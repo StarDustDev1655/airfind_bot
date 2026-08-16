@@ -5,11 +5,11 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from dotenv import load_dotenv
+
 from sqlalchemy import select
 from database import get_db, User, Search, init_db
 
-load_dotenv()
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TRAVELPAYOUTS_TOKEN = os.getenv("TRAVELPAYOUTS_TOKEN")
 
