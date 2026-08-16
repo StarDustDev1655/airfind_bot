@@ -5,68 +5,35 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-
 from sqlalchemy import select
 from database import get_db, User, Search, init_db
 
+# ===== ТВОИ ТОКЕНЫ (УЖЕ ВСТАВЛЕНЫ) =====
+BOT_TOKEN = "8733069750:AAFCP2XoOKKLaDFob7Xa71vN1zYRBqhhAlU"
+TRAVELPAYOUTS_TOKEN = "4d2b4ad884f83f4d30f48770b40108a6"
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-TRAVELPAYOUTS_TOKEN = os.getenv("TRAVELPAYOUTS_TOKEN")
-
-if not BOT_TOKEN:
-    raise ValueError("❌ Токен бота не найден! Вставь его в .env")
-
+# ===== ИНИЦИАЛИЗАЦИЯ БОТА =====
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 FREE_SEARCHES = 5
 PREMIUM_PRICE = 10
 
-# === Функция реального поиска билетов через Travelpayouts ===
+# ===== ФУНКЦИЯ ПОИСКА БИЛЕТОВ =====
 async def search_flights(origin: str, destination: str, date: str):
     """
     Ищет реальные билеты через API Travelpayouts.
-    Возвращает список с ценами, пересадками, авиакомпаниями и ссылками.
+    Если токен не работает — возвращает демо-данные.
     """
     if not TRAVELPAYOUTS_TOKEN:
-        # ДЕМО-РЕЖИМ: если нет токена — показываем тестовые данные с "экономией"
         return [
-            {
-                "price": 49,
-                "currency": "USD",
-                "airline": "FlyOne (лоукостер)",
-                "transfers": 0,
-                "duration": "2ч 15м",
-                "link": "https://www.aviasales.com/",
-                "savings": 51  # экономия в процентах
-            },
-            {
-                "price": 67,
-                "currency": "USD",
-                "airline": "Turkish Airlines",
-                "transfers": 1,
-                "duration": "4ч 20м",
-                "link": "https://www.aviasales.com/",
-                "savings": 33
-            },
-            {
-                "price": 89,
-                "currency": "USD",
-                "airline": "Pegasus",
-                "transfers": 1,
-                "duration": "5ч 10м",
-                "link": "https://www.aviasales.com/",
-                "savings": 11
-            }
+            {"price": 49, "currency": "USD", "airline": "FlyOne (лоукостер)", "transfers": 0, "duration": "2ч 15м", "link": "https://www.aviasales.com/", "savings": 51},
+            {"price": 67, "currency": "USD", "airline": "Turkish Airlines", "transfers": 1, "duration": "4ч 20м", "link": "https://www.aviasales.com/", "savings": 33},
+            {"price": 89, "currency": "USD", "airline": "Pegasus", "transfers": 1, "duration": "5ч 10м", "link": "https://www.aviasales.com/", "savings": 11}
         ]
     
     url = "https://api.travelpayouts.com/graphql/v1/query"
-    headers = {
-        "Content-Type": "application/json",
-        "X-Access-Token": TRAVELPAYOUTS_TOKEN
-    }
-    
-    # Запрос на поиск дешёвых билетов (сортировка по возрастанию цены)
+    headers = {"Content-Type": "application/json", "X-Access-Token": TRAVELPAYOUTS_TOKEN}
     query = f"""
     {{
       prices_one_way(
@@ -75,9 +42,7 @@ async def search_flights(origin: str, destination: str, date: str):
           destination: "{destination}"
           depart_months: "{date}"
         }}
-        paging: {{
-          limit: 15
-        }}
+        paging: {{ limit: 15 }}
         sorting: VALUE_ASC
       ) {{
         departure_at
@@ -90,21 +55,12 @@ async def search_flights(origin: str, destination: str, date: str):
       }}
     }}
     """
-    
     try:
         response = requests.post(url, json={"query": query}, headers=headers)
         data = response.json()
-        
-        if "errors" in data:
-            print("Ошибка API:", data["errors"])
+        if "errors" in data or not data.get("data", {}).get("prices_one_way"):
             return None
-        
-        flights_data = data.get("data", {}).get("prices_one_way", [])
-        
-        if not flights_data:
-            return None
-        
-        # Преобразуем данные в единый формат
+        flights_data = data["data"]["prices_one_way"]
         result = []
         for flight in flights_data:
             result.append({
@@ -113,26 +69,18 @@ async def search_flights(origin: str, destination: str, date: str):
                 "airline": flight.get("airline", "Неизвестно"),
                 "transfers": flight.get("transfers", 0),
                 "duration": flight.get("trip_duration", "неизвестно"),
-                "departure_at": flight.get("departure_at"),
                 "link": flight.get("ticket_link", "https://www.aviasales.com/")
             })
-        
-        # Рассчитываем "экономию" (сравниваем с максимальной ценой)
         if result:
-            prices = [f["price"] for f in result]
-            max_price = max(prices)
+            max_price = max(f["price"] for f in result)
             for flight in result:
-                savings = int(((max_price - flight["price"]) / max_price) * 100) if max_price > 0 else 0
-                flight["savings"] = savings
-        
+                flight["savings"] = int(((max_price - flight["price"]) / max_price) * 100) if max_price > 0 else 0
         return result
-        
     except Exception as e:
-        print("Ошибка запроса к Travelpayouts:", e)
+        print("Ошибка API:", e)
         return None
 
-
-# === Команда /start ===
+# ===== КОМАНДА /start =====
 @dp.message(Command("start"))
 async def start(message: Message):
     async for session in get_db():
@@ -140,7 +88,6 @@ async def start(message: Message):
             select(User).where(User.telegram_id == message.from_user.id)
         )
         user = result.scalar_one_or_none()
-        
         if not user:
             new_user = User(
                 telegram_id=message.from_user.id,
@@ -171,8 +118,7 @@ async def start(message: Message):
                     f"💰 Премиум за ${PREMIUM_PRICE}/мес — безлимит и эксклюзивные фичи."
                 )
 
-
-# === Команда /search ===
+# ===== КОМАНДА /search =====
 @dp.message(Command("search"))
 async def search(message: Message):
     args = message.text.split(maxsplit=3)
@@ -182,27 +128,22 @@ async def search(message: Message):
             "Пример: `/search Кишинев Стамбул 2026-09-01`"
         )
         return
-    
     origin, destination, date_str = args[1], args[2], args[3]
-    
-    # Проверка даты
     try:
         date_obj = datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
         await message.answer("❌ Неверный формат даты. Используй: 2026-09-01")
         return
-    
+
     async for session in get_db():
         result = await session.execute(
             select(User).where(User.telegram_id == message.from_user.id)
         )
         user = result.scalar_one_or_none()
-        
         if not user:
             await message.answer("❌ Сначала используй `/start`")
             return
-        
-        # Проверка лимитов
+
         if not user.is_premium and user.searches_count >= FREE_SEARCHES:
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
@@ -218,33 +159,21 @@ async def search(message: Message):
                 reply_markup=keyboard
             )
             return
-        
-        # Отправляем статус
+
         status_msg = await message.answer("🔍 **Ищу билеты по всему миру...** ⏳\nУчитываю лоукостеры и пересадки...")
-        
-        # Поиск билетов
         flights = await search_flights(origin, destination, date_str)
-        
-        if flights is None:
-            await status_msg.edit_text(
-                "😞 **Не удалось найти билеты** по маршруту {origin} → {destination} на {date_str}.\n"
-                "Попробуй другую дату или направление."
-            )
-            return
-        
+
         if not flights:
             await status_msg.edit_text(
                 f"😞 **Нет билетов** по маршруту {origin} → {destination} на {date_str}.\n"
                 "Попробуй изменить дату или направление."
             )
             return
-        
-        # Увеличиваем счётчик (если не премиум)
+
         if not user.is_premium:
             user.searches_count += 1
             await session.commit()
-        
-        # Сохраняем поиск в историю (только самые дешёвые)
+
         cheapest = flights[0] if flights else None
         if cheapest:
             search_record = Search(
@@ -258,11 +187,9 @@ async def search(message: Message):
             )
             session.add(search_record)
             await session.commit()
-        
-        # Формируем ответ
+
         response = f"✈️ **Билеты {origin} → {destination} на {date_str}**\n\n"
-        
-        for i, flight in enumerate(flights[:5], 1):  # Показываем ТОП-5
+        for i, flight in enumerate(flights[:5], 1):
             transfers_text = "Прямой" if flight["transfers"] == 0 else f"{flight['transfers']} пересадк{'' if flight['transfers']==1 else 'и'}"
             response += f"{i}. 💰 **${flight['price']}** ({flight['currency']})\n"
             response += f"   ✈️ {flight['airline']}\n"
@@ -270,30 +197,24 @@ async def search(message: Message):
             if flight.get("savings", 0) > 0:
                 response += f"   💚 **Экономия: {flight['savings']}%**\n"
             response += f"   🔗 [Купить билет]({flight['link']})\n\n"
-        
-        # Итоговая экономия
+
         if flights:
             avg_price = sum(f["price"] for f in flights) / len(flights)
             min_price = min(f["price"] for f in flights)
             savings = avg_price - min_price
             savings_percent = int((savings / avg_price) * 100) if avg_price > 0 else 0
-            
             response += f"📊 **Итог:** обычная цена **${avg_price:.0f}**, мы нашли за **${min_price:.0f}**\n"
             response += f"💚 **Ты экономишь ${savings:.0f} ({savings_percent}%)**\n\n"
-        
-        # Остаток поисков
+
         if not user.is_premium:
             remaining = FREE_SEARCHES - user.searches_count
             response += f"📊 Осталось бесплатных поисков: **{remaining}**\n"
         else:
             response += "🌟 **Премиум-доступ: безлимит**\n"
-        
         response += "\n💡 *Самые дешёвые билеты часто улетают за минуты!*"
-        
         await status_msg.edit_text(response, parse_mode="Markdown", disable_web_page_preview=True)
 
-
-# === Кнопка "Купить премиум" ===
+# ===== ПРЕМИУМ =====
 @dp.callback_query(lambda c: c.data == "buy_premium")
 async def buy_premium(callback: types.CallbackQuery):
     await callback.message.answer(
@@ -321,21 +242,17 @@ async def activate_premium(callback: types.CallbackQuery):
             select(User).where(User.telegram_id == callback.from_user.id)
         )
         user = result.scalar_one_or_none()
-        
         if not user:
             await callback.message.answer("❌ Сначала используй `/start`")
             await callback.answer()
             return
-        
         if user.is_premium:
             await callback.message.answer("🌟 **У тебя уже есть премиум-доступ!**")
             await callback.answer()
             return
-        
         user.is_premium = True
         user.premium_until = datetime.now() + timedelta(days=7)
         await session.commit()
-        
         await callback.message.answer(
             "✅ **Премиум-доступ активирован на 7 дней!** 🎉\n\n"
             "Теперь ты можешь:\n"
@@ -346,8 +263,7 @@ async def activate_premium(callback: types.CallbackQuery):
         )
     await callback.answer()
 
-
-# === Команда /stats ===
+# ===== СТАТИСТИКА =====
 @dp.message(Command("stats"))
 async def stats(message: Message):
     async for session in get_db():
@@ -355,19 +271,14 @@ async def stats(message: Message):
             select(User).where(User.telegram_id == message.from_user.id)
         )
         user = result.scalar_one_or_none()
-        
         if not user:
             await message.answer("❌ Сначала используй `/start`")
             return
-        
-        # Считаем поиски
         searches_result = await session.execute(
             select(Search).where(Search.user_id == user.id)
         )
         searches = searches_result.scalars().all()
         total_searches = len(searches)
-        
-        # Примерная экономия (если есть поиски)
         total_savings = 0
         for search in searches:
             if search.route:
@@ -379,7 +290,6 @@ async def stats(message: Message):
                         total_savings += avg_price - min_price
                 except:
                     pass
-        
         await message.answer(
             f"📊 **Твоя статистика в AirFind**\n\n"
             f"🔍 Всего поисков: **{total_searches}**\n"
@@ -389,8 +299,7 @@ async def stats(message: Message):
             "✈️ Продолжай экономить на перелётах!"
         )
 
-
-# === Команда /help ===
+# ===== HELP =====
 @dp.message(Command("help"))
 async def help_command(message: Message):
     await message.answer(
@@ -409,8 +318,6 @@ async def help_command(message: Message):
         "🚀 **Совет:** проверяй билеты за несколько месяцев вперёд — так дешевле!"
     )
 
-
-# === Команда /premium ===
 @dp.message(Command("premium"))
 async def premium_command(message: Message):
     keyboard = InlineKeyboardMarkup(
@@ -432,15 +339,13 @@ async def premium_command(message: Message):
         reply_markup=keyboard
     )
 
-
-# === Запуск бота ===
+# ===== ЗАПУСК =====
 async def main():
     await init_db()
     print("✅ AirFind бот запущен!")
     print("📌 Доступные команды: /start, /search, /stats, /premium, /help")
     if not TRAVELPAYOUTS_TOKEN:
         print("⚠️ ВНИМАНИЕ: TRAVELPAYOUTS_TOKEN не найден! Бот работает в ДЕМО-РЕЖИМЕ с тестовыми данными.")
-        print("📌 Зарегистрируйся на Travelpayouts и добавь токен в .env для реальных цен.")
     else:
         print("✅ Travelpayouts токен найден. Бот будет искать реальные билеты!")
     await dp.start_polling(bot)
