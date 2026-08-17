@@ -33,6 +33,17 @@ class Search(Base):
     route = Column(JSON)
     created_at = Column(DateTime, default=datetime.now)
 
+class Track(Base):
+    __tablename__ = "tracks"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer)
+    origin = Column(String)
+    destination = Column(String)
+    max_price = Column(DECIMAL(10,2))
+    currency = Column(String, default="USD")
+    created_at = Column(DateTime, default=datetime.now)
+    last_checked = Column(DateTime, default=datetime.now)
+
 async def get_db():
     async with AsyncSessionLocal() as session:
         yield session
