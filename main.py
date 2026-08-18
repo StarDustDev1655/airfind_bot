@@ -17,11 +17,40 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = "8733069750:AAFCP2XoOKKLaDFob7Xa71vN1zYRBqhhAlU"
 TRAVELPAYOUTS_TOKEN = "4d2b4ad884f83f4d30f48770b40108a6"
 
-# ===== ИНИЦИАЛИЗАЦИЯ БОТА =====
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+# ===== СЛОВАРЬ ДЛЯ ПРЕОБРАЗОВАНИЯ ГОРОДОВ В IATA =====
+CITY_TO_IATA = {
+    "кишинев": "KIV", "кишинёв": "KIV",
+    "рим": "FCO", "милан": "MIL", "венеция": "VCE", "неаполь": "NAP",
+    "стамбул": "IST", "анкара": "ESB", "измир": "ADB",
+    "париж": "PAR", "лион": "LYS", "марсель": "MRS",
+    "лондон": "LON", "манчестер": "MAN", "эдинбург": "EDI",
+    "нью-йорк": "NYC", "лос-анджелес": "LAX", "чикаго": "CHI",
+    "дубай": "DXB", "абу-даби": "AUH", "доха": "DOH",
+    "токио": "TYO", "осака": "OSA", "киото": "KYO",
+    "манила": "MNL", "себу": "CEB",
+    "рио-де-жанейро": "RIO", "сан-паулу": "SAO",
+    "каир": "CAI", "дубай": "DXB",
+    "мадрид": "MAD", "барселона": "BCN",
+    "берлин": "BER", "мюнхен": "MUC",
+    "афины": "ATH", "салоники": "SKG",
+    "тель-авив": "TLV", "иерусалим": "JRS",
+    "варшава": "WAW", "краков": "KRK",
+    "бухарест": "BUH", "софия": "SOF",
+    "белград": "BEG", "загреб": "ZAG",
+    "прага": "PRG", "будапешт": "BUD",
+    "вена": "VIE", "цюрих": "ZRH",
+    "астрахань": "ASF", "казань": "KZN",
+    "москва": "MOW", "санкт-петербург": "LED",
+    "минск": "MSQ", "киев": "IEV", "львов": "LWO",
+    "одесса": "ODS", "харьков": "HRK"
+}
 
-# ===== ФУНКЦИЯ ГЕНЕРАЦИИ ДЕМО-ЦЕН (запасной вариант) =====
+def city_to_iata(city_name: str) -> str:
+    """Преобразует название города в IATA-код"""
+    city_lower = city_name.lower().strip()
+    return CITY_TO_IATA.get(city_lower, city_name.upper())
+
+# ===== ФУНКЦИЯ ГЕНЕРАЦИИ ДЕМО-ЦЕН =====
 def generate_demo_prices(origin, destination):
     import random
     base_prices = {
@@ -72,11 +101,21 @@ def detect_error_fares(flights):
 
 # ===== ПОИСК БИЛЕТОВ (LetsFG + Travelpayouts) =====
 async def search_cheapest_flights(origin: str, destination: str):
-    # 1. Пытаемся использовать LetsFG
+    # Преобразуем города в IATA-коды
+    origin_iata = city_to_iata(origin)
+    destination_iata = city_to_iata(destination)
+    
+    # 1. Пытаемся использовать LetsFG (синхронная функция → запускаем в потоке)
     try:
         from letsfg import LetsFG
         letsfg = LetsFG()
-        result = letsfg.search_local(origin, destination, datetime.now().strftime("%Y-%m-%d"))
+        # Запускаем синхронную функцию в отдельном потоке
+        result = await asyncio.to_thread(
+            letsfg.search_local, 
+            origin_iata, 
+            destination_iata, 
+            datetime.now().strftime("%Y-%m-%d")
+        )
         if result and len(result) > 0:
             flights = []
             for item in result[:5]:
@@ -94,9 +133,8 @@ async def search_cheapest_flights(origin: str, destination: str):
     except Exception as e:
         logging.warning(f"LetsFG не доступен: {e}")
 
-    # 2. Пробуем Travelpayouts (исправленный метод)
-    # Используем метод /v1/prices/monthly (рабочий)
-    url = f"https://api.travelpayouts.com/v1/prices/monthly?origin={origin}&destination={destination}&token={TRAVELPAYOUTS_TOKEN}"
+    # 2. Пробуем Travelpayouts
+    url = f"https://api.travelpayouts.com/v1/prices/monthly?origin={origin_iata}&destination={destination_iata}&token={TRAVELPAYOUTS_TOKEN}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "application/json",
@@ -106,22 +144,15 @@ async def search_cheapest_flights(origin: str, destination: str):
         timeout = ClientTimeout(total=10)
         async with ClientSession(headers=headers) as session:
             async with session.get(url, timeout=timeout) as response:
-                # Проверяем, что ответ — JSON, а не HTML
                 content_type = response.headers.get('Content-Type', '')
                 if 'application/json' not in content_type:
                     logging.warning(f"Travelpayouts вернул не JSON (Content-Type: {content_type})")
                     return None
-                
                 data = await response.json()
-                
-                # Проверяем, что в ответе есть данные
                 if data and isinstance(data, dict):
-                    # Если ключ неактивен, может вернуться {'error': '...'}
                     if 'error' in data:
                         logging.warning(f"Travelpayouts ошибка: {data['error']}")
                         return None
-                    
-                    # Если есть данные — парсим
                     flights = []
                     for date_str, price in data.items():
                         if date_str and isinstance(price, (int, float)):
@@ -132,7 +163,7 @@ async def search_cheapest_flights(origin: str, destination: str):
                                 "airline": "—",
                                 "transfers": "—",
                                 "duration": "—",
-                                "link": f"https://www.aviasales.com/search/{origin}{destination}"
+                                "link": f"https://www.aviasales.com/search/{origin_iata}{destination_iata}"
                             })
                     if flights:
                         flights.sort(key=lambda x: x['price'])
