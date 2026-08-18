@@ -3,7 +3,7 @@ import os
 import json
 import logging
 from datetime import datetime, timedelta
-from aiohttp import web
+from aiohttp import web, ClientSession, ClientTimeout
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery
@@ -94,33 +94,54 @@ async def search_cheapest_flights(origin: str, destination: str):
     except Exception as e:
         logging.warning(f"LetsFG не доступен: {e}")
 
-    # 2. Пробуем Travelpayouts
-    url = f"http://api.travelpayouts.com/v1/prices/month?origin={origin}&destination={destination}&token={TRAVELPAYOUTS_TOKEN}"
+    # 2. Пробуем Travelpayouts (исправленный метод)
+    # Используем метод /v1/prices/monthly (рабочий)
+    url = f"https://api.travelpayouts.com/v1/prices/monthly?origin={origin}&destination={destination}&token={TRAVELPAYOUTS_TOKEN}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+    }
     try:
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=10) as response:
+        timeout = ClientTimeout(total=10)
+        async with ClientSession(headers=headers) as session:
+            async with session.get(url, timeout=timeout) as response:
+                # Проверяем, что ответ — JSON, а не HTML
+                content_type = response.headers.get('Content-Type', '')
+                if 'application/json' not in content_type:
+                    logging.warning(f"Travelpayouts вернул не JSON (Content-Type: {content_type})")
+                    return None
+                
                 data = await response.json()
-                if data.get('success') and data.get('data'):
+                
+                # Проверяем, что в ответе есть данные
+                if data and isinstance(data, dict):
+                    # Если ключ неактивен, может вернуться {'error': '...'}
+                    if 'error' in data:
+                        logging.warning(f"Travelpayouts ошибка: {data['error']}")
+                        return None
+                    
+                    # Если есть данные — парсим
                     flights = []
-                    for date_str, price in data['data'].items():
-                        flights.append({
-                            "date": date_str,
-                            "price": price,
-                            "currency": "USD",
-                            "airline": "—",
-                            "transfers": "—",
-                            "duration": "—",
-                            "link": f"https://www.aviasales.com/search/{origin}{destination}"
-                        })
-                    flights.sort(key=lambda x: x['price'])
-                    flights = detect_error_fares(flights)
-                    return flights[:5]
+                    for date_str, price in data.items():
+                        if date_str and isinstance(price, (int, float)):
+                            flights.append({
+                                "date": date_str,
+                                "price": price,
+                                "currency": "USD",
+                                "airline": "—",
+                                "transfers": "—",
+                                "duration": "—",
+                                "link": f"https://www.aviasales.com/search/{origin}{destination}"
+                            })
+                    if flights:
+                        flights.sort(key=lambda x: x['price'])
+                        flights = detect_error_fares(flights)
+                        return flights[:5]
+                return None
     except Exception as e:
         logging.warning(f"Ошибка Travelpayouts: {e}")
-
-    # 3. Если ничего не сработало — демо
-    return generate_demo_prices(origin, destination)
+        return None
 
 # ===== КОМАНДА /start =====
 @dp.message(Command("start"))
