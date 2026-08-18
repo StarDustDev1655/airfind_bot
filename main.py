@@ -3,11 +3,10 @@ import os
 import json
 import logging
 from datetime import datetime, timedelta
-from aiohttp import web, ClientSession
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery
-from aiogram.webhook.aiohttp_server import SimpleWebhookResponse, setup_application
 from sqlalchemy import select
 from database import get_db, User, Search, Track, init_db
 
@@ -21,10 +20,6 @@ TRAVELPAYOUTS_TOKEN = "4d2b4ad884f83f4d30f48770b40108a6"
 # ===== ИНИЦИАЛИЗАЦИЯ БОТА =====
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-
-# ===== НАСТРОЙКИ ПОДПИСКИ =====
-FREE_SEARCHES = 5  # больше не используется при webhook, но оставлю для совместимости
-PREMIUM_PRICE = 1000  # Stars
 
 # ===== ФУНКЦИЯ ГЕНЕРАЦИИ ДЕМО-ЦЕН (запасной вариант) =====
 def generate_demo_prices(origin, destination):
@@ -102,7 +97,8 @@ async def search_cheapest_flights(origin: str, destination: str):
     # 2. Пробуем Travelpayouts
     url = f"http://api.travelpayouts.com/v1/prices/month?origin={origin}&destination={destination}&token={TRAVELPAYOUTS_TOKEN}"
     try:
-        async with ClientSession() as session:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=10) as response:
                 data = await response.json()
                 if data.get('success') and data.get('data'):
@@ -152,14 +148,12 @@ async def start(message: Message):
                 "• Отслеживание маршрутов\n\n"
                 "📌 **Команды:**\n"
                 "/search Кишинев Рим — самые дешёвые дни\n"
-                "/search Кишинев Рим 2026-09-01 2026-09-10 — туда-обратно\n"
                 "/track Кишинев Рим 150 — отслеживать цену ниже $150\n"
                 "/premium — купить премиум\n"
                 "/stats — твоя статистика\n"
                 "/history — история поисков"
             )
         else:
-            remaining = "∞" if user.is_premium else "неограниченно"  # при webhook считаем, что все безлимит
             if user.is_premium:
                 await message.answer("🌟 **Премиум-доступ активен!** Ищи безлимитно.")
             else:
@@ -171,16 +165,14 @@ async def start(message: Message):
 # ===== КОМАНДА /search =====
 @dp.message(Command("search"))
 async def search(message: Message):
-    args = message.text.split(maxsplit=4)
+    args = message.text.split(maxsplit=2)
     if len(args) < 3:
         await message.answer(
             "❌ **Формат:** `/search Город-откуда Город-куда`\n"
-            "Пример: `/search Кишинев Рим`\n"
-            "С датами: `/search Кишинев Рим 2026-09-01 2026-09-10`"
+            "Пример: `/search Кишинев Рим`"
         )
         return
     origin, destination = args[1], args[2]
-    # Даты игнорируем для простоты (будем искать ближайшие дни)
     status_msg = await message.answer("🔍 **Ищу супер-цены по всему миру...** ⏳")
     flights = await search_cheapest_flights(origin, destination)
     if not flights:
@@ -197,7 +189,6 @@ async def search(message: Message):
         )
         user = result.scalar_one_or_none()
         if user:
-            # Сохраняем поиск
             try:
                 date_obj = datetime.strptime(flights[0]["date"], "%Y-%m-%d")
             except:
@@ -235,43 +226,255 @@ async def search(message: Message):
 
     await status_msg.edit_text(response, parse_mode="Markdown", disable_web_page_preview=True)
 
-# ===== ОСТАЛЬНЫЕ КОМАНДЫ (track, stats, history, premium) пропустим для краткости, но они должны быть =====
-# Я их не вставляю, чтобы не перегружать, но ты можешь взять из предыдущей версии и добавить.
-# Главное — ниже будет настройка вебхука.
+# ===== КОМАНДА /premium (заглушка для оплаты через Stars) =====
+@dp.message(Command("premium"))
+async def premium_command(message: Message):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💎 Купить премиум за 1000 Stars", callback_data="buy_premium")]
+        ]
+    )
+    await message.answer(
+        "💎 **Премиум-подписка AirFind**\n\n"
+        f"💰 Стоимость: **1000 Stars (~$10/мес)**\n\n"
+        "**Что ты получаешь:**\n"
+        "✅ Безлимитные поиски\n"
+        "✅ Мгновенные уведомления об ошибках цен\n"
+        "✅ Отслеживание маршрутов\n"
+        "✅ Приоритетные уведомления на 30–60 мин раньше\n"
+        "✅ Экономия до 90%\n\n"
+        "🚀 Нажми кнопку ниже, чтобы оплатить через Telegram Stars.",
+        reply_markup=keyboard
+    )
 
-# ===== НАСТРОЙКА WEBHOOK =====
-async def on_startup():
-    await init_db()
-    # Устанавливаем вебхук
-    webhook_url = "https://airfind-bot.onrender.com/webhook"  # замени на свой URL, если имя другое
-    await bot.set_webhook(webhook_url)
-    logging.info(f"Webhook установлен на {webhook_url}")
+@dp.callback_query(lambda c: c.data == "buy_premium")
+async def buy_premium(callback: types.CallbackQuery):
+    await callback.message.answer(
+        "💎 **Оформление премиум-подписки**\n\n"
+        "💰 Стоимость: **1000 Stars**\n"
+        "📆 Период: **1 месяц**\n\n"
+        "Нажми кнопку ниже, чтобы оплатить.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🌟 Оплатить 1000 Stars", callback_data="pay_premium")]
+            ]
+        )
+    )
+    await callback.answer()
 
-async def on_shutdown():
-    await bot.delete_webhook()
-    await bot.session.close()
-
-# ===== ЗАПУСК ВЕБ-СЕРВЕРА =====
-async def handle_webhook(request):
-    # Обработка входящих обновлений от Telegram
-    body = await request.text()
+@dp.callback_query(lambda c: c.data == "pay_premium")
+async def pay_premium(callback: types.CallbackQuery):
     try:
-        update = types.Update(**json.loads(body))
-        await dp.process_update(update)
-        return web.Response(status=200)
+        await bot.send_invoice(
+            chat_id=callback.from_user.id,
+            title="AirFind Premium (1 месяц)",
+            description="Безлимитный поиск + уведомления об ошибках",
+            payload="premium_month",
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice(label="Подписка на месяц", amount=1000)]
+        )
     except Exception as e:
-        logging.error(f"Ошибка обработки webhook: {e}")
-        return web.Response(status=500)
+        await callback.message.answer(f"❌ Ошибка оплаты: {str(e)}")
+    await callback.answer()
 
-def main():
+@dp.pre_checkout_query(lambda query: True)
+async def pre_checkout_query(pre_checkout_q: PreCheckoutQuery):
+    await bot.answer_pre_checkout_query(pre_checkout_q.id, ok=True)
+
+@dp.message(lambda message: message.successful_payment)
+async def successful_payment(message: Message):
+    async for session in get_db():
+        result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+        if user:
+            user.is_premium = True
+            user.premium_until = datetime.now() + timedelta(days=30)
+            await session.commit()
+            await message.answer(
+                "✅ **Премиум-доступ активирован на 30 дней!** 🎉\n\n"
+                "Теперь ты можешь:\n"
+                "• Искать безлимитно\n"
+                "• Получать уведомления об ошибках цен\n"
+                "• Отслеживать маршруты\n\n"
+                "Спасибо, что выбрал AirFind! ✈️"
+            )
+
+# ===== КОМАНДА /stats =====
+@dp.message(Command("stats"))
+async def stats(message: Message):
+    async for session in get_db():
+        result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            await message.answer("❌ Сначала используй `/start`")
+            return
+        searches = await session.execute(
+            select(Search).where(Search.user_id == user.id)
+        )
+        searches = searches.scalars().all()
+        total_searches = len(searches)
+        total_savings = 0
+        for search in searches:
+            if search.route:
+                try:
+                    flights = search.route
+                    if flights and len(flights) > 0:
+                        avg_price = sum(f["price"] for f in flights) / len(flights)
+                        min_price = min(f["price"] for f in flights)
+                        total_savings += avg_price - min_price
+                except:
+                    pass
+        await message.answer(
+            f"📊 **Твоя статистика в AirFind**\n\n"
+            f"🔍 Всего поисков: **{total_searches}**\n"
+            f"💎 Премиум: **{'✅ Да' if user.is_premium else '❌ Нет'}**\n"
+            f"💰 Примерно сэкономлено: **${total_savings:.0f}**"
+        )
+
+# ===== КОМАНДА /history =====
+@dp.message(Command("history"))
+async def history(message: Message):
+    async for session in get_db():
+        result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            await message.answer("❌ Сначала используй `/start`")
+            return
+        searches = await session.execute(
+            select(Search).where(Search.user_id == user.id).order_by(Search.created_at.desc()).limit(10)
+        )
+        searches = searches.scalars().all()
+        if not searches:
+            await message.answer("📭 У тебя пока нет истории поисков.")
+            return
+        response = "📜 **Последние 10 поисков:**\n\n"
+        for s in searches:
+            response += f"✈️ {s.origin} → {s.destination}\n"
+            response += f"💰 ${s.price} | 📅 {s.date_from.strftime('%d.%m.%Y')}\n\n"
+        await message.answer(response)
+
+# ===== ОТСЛЕЖИВАНИЕ МАРШРУТОВ =====
+@dp.message(Command("track"))
+async def track(message: Message):
+    args = message.text.split(maxsplit=3)
+    if len(args) < 4:
+        await message.answer(
+            "❌ **Формат:** `/track Город-откуда Город-куда Макс_цена`\n"
+            "Пример: `/track Кишинев Рим 150`"
+        )
+        return
+    origin, destination, max_price = args[1], args[2], args[3]
+    try:
+        max_price = float(max_price)
+    except ValueError:
+        await message.answer("❌ Цена должна быть числом. Пример: 150")
+        return
+    async for session in get_db():
+        result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            await message.answer("❌ Сначала используй `/start`")
+            return
+        if not user.is_premium:
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="💎 Купить премиум", callback_data="buy_premium")]
+                ]
+            )
+            await message.answer(
+                "⛔ **Отслеживание цен доступно только для премиум-пользователей!**\n\n"
+                "💰 Купи премиум за 1000 Stars (~$10).",
+                reply_markup=keyboard
+            )
+            return
+        existing = await session.execute(
+            select(Track).where(
+                Track.user_id == user.id,
+                Track.origin == origin,
+                Track.destination == destination
+            )
+        )
+        if existing.scalar_one_or_none():
+            await message.answer(f"✅ Ты уже отслеживаешь маршрут {origin} → {destination}.")
+            return
+        new_track = Track(
+            user_id=user.id,
+            origin=origin,
+            destination=destination,
+            max_price=max_price,
+            currency="USD",
+            created_at=datetime.now(),
+            last_checked=datetime.now()
+        )
+        session.add(new_track)
+        await session.commit()
+        await message.answer(
+            f"✅ **Отслеживание активировано!**\n\n"
+            f"{origin} → {destination}\n"
+            f"💰 Пришлю уведомление, когда цена упадёт ниже **${max_price}**."
+        )
+
+# ===== ФОНОВАЯ ЗАДАЧА ДЛЯ ОТСЛЕЖИВАНИЯ =====
+async def check_tracks():
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.triggers.interval import IntervalTrigger
+    async def check():
+        print("🔍 Проверка отслеживаемых цен...")
+        async for session in get_db():
+            tracks = await session.execute(select(Track))
+            tracks = tracks.scalars().all()
+            for track in tracks:
+                flights = await search_cheapest_flights(track.origin, track.destination)
+                if flights and flights[0]["price"] < track.max_price:
+                    try:
+                        await bot.send_message(
+                            chat_id=track.user_id,
+                            text=f"🔔 **Цена упала!**\n\n"
+                                 f"✈️ {track.origin} → {track.destination}\n"
+                                 f"💰 Текущая цена: **${flights[0]['price']}**\n"
+                                 f"📅 Дата: {flights[0]['date']}\n"
+                                 f"🔗 [Купить билет]({flights[0]['link']})"
+                        )
+                        await session.delete(track)
+                        await session.commit()
+                    except Exception as e:
+                        print(f"Ошибка отправки уведомления: {e}")
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(check, IntervalTrigger(hours=1))
+    scheduler.start()
+
+# ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
+async def handle_ping(request):
+    return web.Response(text="AirFind bot is running!")
+
+async def start_web_server():
     app = web.Application()
-    app.router.add_post('/webhook', handle_webhook)
-    # Стартовые и финальные события
-    app.on_startup.append(lambda _: on_startup())
-    app.on_shutdown.append(lambda _: on_shutdown())
-    # Запуск
+    app.router.add_get('/', handle_ping)
     port = int(os.environ.get("PORT", 10000))
-    web.run_app(app, host='0.0.0.0', port=port)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"✅ Веб-сервер запущен на порту {port}")
+
+# ===== ЗАПУСК =====
+async def main():
+    await init_db()
+    asyncio.create_task(start_web_server())
+    await asyncio.sleep(1)
+    asyncio.create_task(check_tracks())
+    print("✅ AirFind 2.0 бот запущен!")
+    print("📌 Доступные команды: /start, /search, /stats, /history, /track, /mytracks, /premium, /help")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
