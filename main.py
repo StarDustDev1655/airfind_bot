@@ -2,6 +2,7 @@ import asyncio
 import os
 import json
 import logging
+import random
 from datetime import datetime, timedelta
 from aiohttp import web, ClientSession, ClientTimeout
 from aiogram import Bot, Dispatcher, types
@@ -17,6 +18,10 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = "8733069750:AAFCP2XoOKKLaDFob7Xa71vN1zYRBqhhAlU"
 TRAVELPAYOUTS_TOKEN = "4d2b4ad884f83f4d30f48770b40108a6"
 
+# ===== ИНИЦИАЛИЗАЦИЯ БОТА =====
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
 # ===== СЛОВАРЬ ДЛЯ ПРЕОБРАЗОВАНИЯ ГОРОДОВ В IATA =====
 CITY_TO_IATA = {
     "кишинев": "KIV", "кишинёв": "KIV",
@@ -29,30 +34,28 @@ CITY_TO_IATA = {
     "токио": "TYO", "осака": "OSA", "киото": "KYO",
     "манила": "MNL", "себу": "CEB",
     "рио-де-жанейро": "RIO", "сан-паулу": "SAO",
-    "каир": "CAI", "дубай": "DXB",
+    "каир": "CAI",
     "мадрид": "MAD", "барселона": "BCN",
     "берлин": "BER", "мюнхен": "MUC",
     "афины": "ATH", "салоники": "SKG",
-    "тель-авив": "TLV", "иерусалим": "JRS",
+    "тель-авив": "TLV",
     "варшава": "WAW", "краков": "KRK",
     "бухарест": "BUH", "софия": "SOF",
     "белград": "BEG", "загреб": "ZAG",
     "прага": "PRG", "будапешт": "BUD",
     "вена": "VIE", "цюрих": "ZRH",
-    "астрахань": "ASF", "казань": "KZN",
     "москва": "MOW", "санкт-петербург": "LED",
     "минск": "MSQ", "киев": "IEV", "львов": "LWO",
     "одесса": "ODS", "харьков": "HRK"
 }
 
 def city_to_iata(city_name: str) -> str:
-    """Преобразует название города в IATA-код"""
+    """Преобразует название города в IATA-код."""
     city_lower = city_name.lower().strip()
     return CITY_TO_IATA.get(city_lower, city_name.upper())
 
-# ===== ФУНКЦИЯ ГЕНЕРАЦИИ ДЕМО-ЦЕН =====
+# ===== ФУНКЦИЯ ГЕНЕРАЦИИ ДЕМО-ЦЕН (запасной вариант) =====
 def generate_demo_prices(origin, destination):
-    import random
     base_prices = {
         ("KIV", "FCO"): 150, ("KIV", "IST"): 120, ("KIV", "CAI"): 200,
         ("KIV", "PAR"): 180, ("KIV", "LON"): 190, ("KIV", "NYC"): 450,
@@ -99,17 +102,17 @@ def detect_error_fares(flights):
             flight["savings"] = 0
     return flights
 
-# ===== ПОИСК БИЛЕТОВ (LetsFG + Travelpayouts) =====
+# ===== ПОИСК БИЛЕТОВ =====
 async def search_cheapest_flights(origin: str, destination: str):
     # Преобразуем города в IATA-коды
     origin_iata = city_to_iata(origin)
     destination_iata = city_to_iata(destination)
     
-    # 1. Пытаемся использовать LetsFG (синхронная функция → запускаем в потоке)
+    # 1. Пытаемся использовать LetsFG
     try:
         from letsfg import LetsFG
         letsfg = LetsFG()
-        # Запускаем синхронную функцию в отдельном потоке
+        # Запускаем синхронную функцию в потоке
         result = await asyncio.to_thread(
             letsfg.search_local, 
             origin_iata, 
@@ -138,7 +141,6 @@ async def search_cheapest_flights(origin: str, destination: str):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "application/json",
-        "Content-Type": "application/json"
     }
     try:
         timeout = ClientTimeout(total=10)
@@ -278,7 +280,7 @@ async def search(message: Message):
 
     await status_msg.edit_text(response, parse_mode="Markdown", disable_web_page_preview=True)
 
-# ===== КОМАНДА /premium (заглушка для оплаты через Stars) =====
+# ===== КОМАНДА /premium =====
 @dp.message(Command("premium"))
 async def premium_command(message: Message):
     keyboard = InlineKeyboardMarkup(
@@ -475,7 +477,7 @@ async def track(message: Message):
             f"💰 Пришлю уведомление, когда цена упадёт ниже **${max_price}**."
         )
 
-# ===== ФОНОВАЯ ЗАДАЧА ДЛЯ ОТСЛЕЖИВАНИЯ =====
+# ===== ФОНОВАЯ ЗАДАЧА =====
 async def check_tracks():
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.interval import IntervalTrigger
@@ -504,7 +506,7 @@ async def check_tracks():
     scheduler.add_job(check, IntervalTrigger(hours=1))
     scheduler.start()
 
-# ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
+# ===== ВЕБ-СЕРВЕР =====
 async def handle_ping(request):
     return web.Response(text="AirFind bot is running!")
 
