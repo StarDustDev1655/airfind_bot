@@ -5,3 +5,4 @@ aiosqlite==0.20.0
 requests==2.32.3
 apscheduler==3.10.4
 aiohttp==3.9.5
+letsfg
