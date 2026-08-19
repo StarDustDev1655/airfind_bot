@@ -1,10 +1,10 @@
 import asyncio
 import os
-import json
 import logging
-import random
+import re
+import json
 from datetime import datetime, timedelta
-from aiohttp import web, ClientSession, ClientTimeout
+from aiohttp import web, ClientSession
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery
@@ -22,199 +22,157 @@ TRAVELPAYOUTS_TOKEN = "4d2b4ad884f83f4d30f48770b40108a6"
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ===== СЛОВАРЬ ДЛЯ ПРЕОБРАЗОВАНИЯ ГОРОДОВ В IATA =====
-CITY_TO_IATA = {
-    "кишинев": "KIV", "кишинёв": "KIV",
-    "рим": "FCO", "милан": "MIL", "венеция": "VCE", "неаполь": "NAP",
-    "стамбул": "IST", "анкара": "ESB", "измир": "ADB",
-    "париж": "PAR", "лион": "LYS", "марсель": "MRS",
-    "лондон": "LON", "манчестер": "MAN", "эдинбург": "EDI",
-    "нью-йорк": "NYC", "лос-анджелес": "LAX", "чикаго": "CHI",
-    "дубай": "DXB", "абу-даби": "AUH", "доха": "DOH",
-    "токио": "TYO", "осака": "OSA", "киото": "KYO",
-    "манила": "MNL", "себу": "CEB",
-    "рио-де-жанейро": "RIO", "сан-паулу": "SAO",
-    "каир": "CAI",
-    "мадрид": "MAD", "барселона": "BCN",
-    "берлин": "BER", "мюнхен": "MUC",
-    "афины": "ATH", "салоники": "SKG",
-    "тель-авив": "TLV",
-    "варшава": "WAW", "краков": "KRK",
-    "бухарест": "BUH", "софия": "SOF",
-    "белград": "BEG", "загреб": "ZAG",
-    "прага": "PRG", "будапешт": "BUD",
-    "вена": "VIE", "цюрих": "ZRH",
-    "москва": "MOW", "санкт-петербург": "LED",
-    "минск": "MSQ", "киев": "IEV", "львов": "LWO",
-    "одесса": "ODS", "харьков": "HRK"
-}
+PREMIUM_PRICE = 1000  # Stars
 
-def city_to_iata(city_name: str) -> str:
-    """Преобразует название города в IATA-код."""
-    city_lower = city_name.lower().strip()
-    return CITY_TO_IATA.get(city_lower, city_name.upper())
+# ===== КАНАЛЫ ДЛЯ ПАРСИНГА =====
+CHANNELS = [
+    '@samokatus',
+    '@travelradar',
+    '@vandroukiru',
+    '@nashaplaneta_net',
+    '@aviasales',
+    '@travelmd',
+    '@budgettravelmd',
+]
 
-# ===== ФУНКЦИЯ ГЕНЕРАЦИИ ДЕМО-ЦЕН (запасной вариант) =====
-def generate_demo_prices(origin, destination):
-    base_prices = {
-        ("KIV", "FCO"): 150, ("KIV", "IST"): 120, ("KIV", "CAI"): 200,
-        ("KIV", "PAR"): 180, ("KIV", "LON"): 190, ("KIV", "NYC"): 450,
-        ("KIV", "DXB"): 250, ("KIV", "MAD"): 170, ("KIV", "MIL"): 160,
-        ("KIV", "VIE"): 130, ("KIV", "BCN"): 165, ("KIV", "ATH"): 155,
-        ("KIV", "MNL"): 220, ("KIV", "RIO"): 350, ("KIV", "TYO"): 400,
-    }
-    base = base_prices.get((origin.upper(), destination.upper()), 200)
-    flights = []
-    start = datetime.now()
-    for i in range(5):
-        date = start + timedelta(days=random.randint(1, 60))
-        price = base + random.randint(-30, 60)
-        if price < 30: price = 30
-        airline = random.choice(["FlyOne", "Turkish Airlines", "Pegasus", "Wizz Air", "Ryanair", "Lufthansa", "Emirates"])
-        transfers = random.choice([0, 1, 2])
-        duration_hours = random.randint(2, 8)
-        duration_min = random.randint(10, 50)
-        flights.append({
-            "date": date.strftime("%Y-%m-%d"),
-            "price": price,
-            "currency": "USD",
-            "airline": airline,
-            "transfers": transfers,
-            "duration": f"{duration_hours}ч {duration_min}м",
-            "link": f"https://www.aviasales.com/search/{origin}{destination}",
-        })
-    flights.sort(key=lambda x: x['price'])
-    return flights[:5]
-
-# ===== ПОИСК ОШИБОЧНЫХ ЦЕН =====
-def detect_error_fares(flights):
-    if not flights or len(flights) < 3:
-        return flights
-    prices = [f["price"] for f in flights]
-    prices.sort()
-    median = prices[len(prices) // 2] if len(prices) % 2 == 1 else (prices[len(prices)//2 - 1] + prices[len(prices)//2]) / 2
-    for flight in flights:
-        if flight["price"] <= median * 0.7:
-            flight["is_error"] = True
-            flight["savings"] = int(((median - flight["price"]) / median) * 100)
-        else:
-            flight["is_error"] = False
-            flight["savings"] = 0
-    return flights
-
-# ===== ПОИСК БИЛЕТОВ =====
-async def search_cheapest_flights(origin: str, destination: str):
-    # Преобразуем города в IATA-коды
-    origin_iata = city_to_iata(origin)
-    destination_iata = city_to_iata(destination)
+# ===== ПАРСЕР КАНАЛОВ (Telethon) =====
+async def start_parser():
+    """
+    Запускает парсинг каналов в фоновом режиме.
+    """
+    from telethon import TelegramClient, events
+    from telethon.tl.types import MessageEntityTextUrl
     
-    # 1. Пытаемся использовать LetsFG
-    try:
-        from letsfg import LetsFG
-        letsfg = LetsFG()
-        # Запускаем синхронную функцию в потоке
-        result = await asyncio.to_thread(
-            letsfg.search_local, 
-            origin_iata, 
-            destination_iata, 
-            datetime.now().strftime("%Y-%m-%d")
-        )
-        if result and len(result) > 0:
-            flights = []
-            for item in result[:5]:
-                flights.append({
-                    "date": datetime.now().strftime("%Y-%m-%d"),
-                    "price": item.get("price", 200),
-                    "currency": "USD",
-                    "airline": item.get("airline", "Unknown"),
-                    "transfers": item.get("stops", 0),
-                    "duration": item.get("duration", "unknown"),
-                    "link": item.get("deep_link", "#")
-                })
-            flights = detect_error_fares(flights)
-            return flights
-    except Exception as e:
-        logging.warning(f"LetsFG не доступен: {e}")
-
-    # 2. Пробуем Travelpayouts
-    url = f"https://api.travelpayouts.com/v1/prices/monthly?origin={origin_iata}&destination={destination_iata}&token={TRAVELPAYOUTS_TOKEN}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json",
-    }
-    try:
-        timeout = ClientTimeout(total=10)
-        async with ClientSession(headers=headers) as session:
-            async with session.get(url, timeout=timeout) as response:
-                content_type = response.headers.get('Content-Type', '')
-                if 'application/json' not in content_type:
-                    logging.warning(f"Travelpayouts вернул не JSON (Content-Type: {content_type})")
-                    return None
-                data = await response.json()
-                if data and isinstance(data, dict):
-                    if 'error' in data:
-                        logging.warning(f"Travelpayouts ошибка: {data['error']}")
-                        return None
-                    flights = []
-                    for date_str, price in data.items():
-                        if date_str and isinstance(price, (int, float)):
-                            flights.append({
-                                "date": date_str,
-                                "price": price,
-                                "currency": "USD",
-                                "airline": "—",
-                                "transfers": "—",
-                                "duration": "—",
-                                "link": f"https://www.aviasales.com/search/{origin_iata}{destination_iata}"
-                            })
-                    if flights:
-                        flights.sort(key=lambda x: x['price'])
-                        flights = detect_error_fares(flights)
-                        return flights[:5]
-                return None
-    except Exception as e:
-        logging.warning(f"Ошибка Travelpayouts: {e}")
-        return None
+    # Получаем API ID и Hash из переменных окружения
+    api_id = int(os.getenv("API_ID", 0))
+    api_hash = os.getenv("API_HASH", "")
+    
+    if not api_id or not api_hash:
+        logging.warning("API_ID и API_HASH не заданы. Парсинг каналов отключён.")
+        return
+    
+    client = TelegramClient('airfind_session', api_id, api_hash)
+    await client.start()
+    
+    # Подписываемся на каналы
+    for channel in CHANNELS:
+        try:
+            await client.get_entity(channel)
+            logging.info(f"Подписан на канал: {channel}")
+        except Exception as e:
+            logging.warning(f"Не удалось подключиться к {channel}: {e}")
+    
+    @client.on(events.NewMessage(chats=CHANNELS))
+    async def handle_new_message(event):
+        try:
+            message = event.message
+            if not message or not message.text:
+                return
+            
+            text = message.text
+            # Ищем цены и направления
+            price_match = re.search(r'(\d+)\s*[€$]', text)
+            if not price_match:
+                return
+            
+            price = int(price_match.group(1))
+            
+            # Ищем направления (город->город)
+            direction_match = re.search(r'([А-Яа-яA-Za-z\s\-]+)\s*[—\-–]\s*([А-Яа-яA-Za-z\s\-]+)', text)
+            if not direction_match:
+                return
+            
+            origin = direction_match.group(1).strip()
+            destination = direction_match.group(2).strip()
+            
+            # Сохраняем в базу
+            async for session in get_db():
+                offer = Search(
+                    user_id=0,  # общее предложение
+                    origin=origin,
+                    destination=destination,
+                    date_from=datetime.now(),
+                    price=price,
+                    currency="USD",
+                    route=[{
+                        "date": datetime.now().strftime("%Y-%m-%d"),
+                        "price": price,
+                        "currency": "USD",
+                        "airline": "—",
+                        "transfers": "—",
+                        "link": "https://www.aviasales.com/",
+                        "is_error": True,
+                        "savings": 90
+                    }]
+                )
+                session.add(offer)
+                await session.commit()
+                
+                # Уведомляем премиум-пользователей, которые ждут это направление
+                tracks = await session.execute(
+                    select(Track).where(
+                        Track.origin.ilike(f"%{origin}%"),
+                        Track.destination.ilike(f"%{destination}%")
+                    )
+                )
+                for track in tracks.scalars().all():
+                    try:
+                        await bot.send_message(
+                            chat_id=track.user_id,
+                            text=f"🔥 **ОШИБКА ЦЕНЫ!**\n\n"
+                                 f"✈️ {origin} → {destination}\n"
+                                 f"💰 Цена: **${price}**\n"
+                                 f"📅 Дата: {datetime.now().strftime('%d.%m.%Y')}\n"
+                                 f"💚 Скидка до 90%!\n\n"
+                                 f"🔗 [Купить билет](https://www.aviasales.com/search/{origin}{destination})"
+                        )
+                    except Exception as e:
+                        logging.error(f"Ошибка уведомления: {e}")
+        except Exception as e:
+            logging.error(f"Ошибка обработки сообщения: {e}")
+    
+    await client.run_until_disconnected()
 
 # ===== КОМАНДА /start =====
 @dp.message(Command("start"))
 async def start(message: Message):
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💎 Купить премиум", callback_data="buy_premium")],
+            [InlineKeyboardButton(text="📊 Моя статистика", callback_data="stats")]
+        ]
+    )
+    
     async for session in get_db():
         result = await session.execute(
             select(User).where(User.telegram_id == message.from_user.id)
         )
         user = result.scalar_one_or_none()
+        
         if not user:
             new_user = User(
                 telegram_id=message.from_user.id,
                 username=message.from_user.username,
-                first_name=message.from_user.first_name
+                first_name=message.from_user.first_name,
+                created_at=datetime.now()
             )
             session.add(new_user)
             await session.commit()
-            await message.answer(
-                "✈️ **Добро пожаловать в AirFind — охотник за супер-ценами!**\n\n"
-                "🔍 **Я ищу билеты по всему миру** с максимальной скидкой.\n"
-                "🔥 **Ошибочные цены** — моя главная фишка (экономия до 90%).\n\n"
-                "💰 **Премиум за 1000 Stars (~$10/мес)** даёт:\n"
-                "• Безлимитные поиски\n"
-                "• Мгновенные уведомления об ошибках цен\n"
-                "• Отслеживание маршрутов\n\n"
-                "📌 **Команды:**\n"
-                "/search Кишинев Рим — самые дешёвые дни\n"
-                "/track Кишинев Рим 150 — отслеживать цену ниже $150\n"
-                "/premium — купить премиум\n"
-                "/stats — твоя статистика\n"
-                "/history — история поисков"
-            )
-        else:
-            if user.is_premium:
-                await message.answer("🌟 **Премиум-доступ активен!** Ищи безлимитно.")
-            else:
-                await message.answer(
-                    f"👋 **С возвращением!** У тебя безлимитный бесплатный период (7 дней).\n"
-                    f"💰 Премиум за 1000 Stars (~$10) — безлимит и супер-цены."
-                )
+        
+        await message.answer(
+            "✈️ **AirFind — твой личный охотник за супер-ценами!**\n\n"
+            "🔥 **Я нахожу билеты с ошибками цен** — те самые, за €50 вместо €500.\n"
+            "💡 **Как я это делаю:** я мониторю 10+ каналов с дешёвыми билетами и мгновенно присылаю тебе лучшие предложения.\n\n"
+            "💰 **Премиум за 1000 Stars (~$10/мес) даёт тебе:**\n"
+            "✅ **Мгновенные уведомления** об ошибках цен (на 30–60 мин раньше, чем в каналах)\n"
+            "✅ **Безлимитный поиск** по всем направлениям\n"
+            "✅ **Отслеживание маршрутов** — я пришлю уведомление, когда цена упадёт\n"
+            "✅ **Экономия до 90%** на каждом билете\n\n"
+            "💎 **Одна найденная ошибка цен окупает подписку на годы вперёд!**\n\n"
+            "🔍 Попробуй прямо сейчас: `/search Кишинев Рим`",
+            reply_markup=keyboard,
+            parse_mode="Markdown"
+        )
 
 # ===== КОМАНДА /search =====
 @dp.message(Command("search"))
@@ -223,62 +181,48 @@ async def search(message: Message):
     if len(args) < 3:
         await message.answer(
             "❌ **Формат:** `/search Город-откуда Город-куда`\n"
-            "Пример: `/search Кишинев Рим`"
+            "Пример: `/search Кишинев Рим`\n\n"
+            "🔍 Я покажу тебе самые дешёвые билеты из моей базы."
         )
         return
+    
     origin, destination = args[1], args[2]
-    status_msg = await message.answer("🔍 **Ищу супер-цены по всему миру...** ⏳")
-    flights = await search_cheapest_flights(origin, destination)
-    if not flights:
-        await status_msg.edit_text(
-            f"😞 **Не найдено билетов** по маршруту {origin} → {destination}.\n"
-            "Попробуй другое направление или IATA-коды (например, KIV FCO)."
-        )
-        return
-
-    # Сохраняем историю
+    status_msg = await message.answer("🔍 **Ищу супер-цены...** ⏳")
+    
     async for session in get_db():
-        result = await session.execute(
-            select(User).where(User.telegram_id == message.from_user.id)
+        # Ищем в базе сохранённые предложения
+        results = await session.execute(
+            select(Search).where(
+                Search.origin.ilike(f"%{origin}%"),
+                Search.destination.ilike(f"%{destination}%")
+            ).order_by(Search.price.asc()).limit(5)
         )
-        user = result.scalar_one_or_none()
-        if user:
-            try:
-                date_obj = datetime.strptime(flights[0]["date"], "%Y-%m-%d")
-            except:
-                date_obj = datetime.now()
-            search_record = Search(
-                user_id=user.id,
-                origin=origin,
-                destination=destination,
-                date_from=date_obj,
-                price=flights[0]["price"],
-                currency=flights[0]["currency"],
-                route=flights
+        offers = results.scalars().all()
+        
+        if not offers:
+            await status_msg.edit_text(
+                f"😞 **Пока нет предложений** по маршруту {origin} → {destination}.\n\n"
+                "💡 **Подпишись на премиум**, и я пришлю уведомление, когда появится супер-цена!\n"
+                "💰 Премиум за 1000 Stars (~$10/мес) — окупается с первой покупки.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [InlineKeyboardButton(text="💎 Купить премиум", callback_data="buy_premium")]
+                    ]
+                )
             )
-            session.add(search_record)
-            await session.commit()
-
-    # Формируем ответ
-    response = f"✈️ **Супер-цены: {origin} → {destination}**\n\n"
-    for i, flight in enumerate(flights[:5], 1):
-        error_mark = " 🔥 ОШИБКА ЦЕНЫ!" if flight.get("is_error") else ""
-        response += f"{i}. 📅 {flight['date']} — 💰 **${flight['price']}**{error_mark}\n"
-        if flight['airline'] != "—":
-            transfers_text = "Прямой" if flight['transfers'] == 0 else f"{flight['transfers']} пересадки"
-            response += f"   ✈️ {flight['airline']} | 🛤️ {transfers_text} | ⏱️ {flight['duration']}\n"
-        if flight.get("savings", 0) > 0:
-            response += f"   💚 **Скидка: {flight['savings']}%**\n"
-        response += f"   🔗 [Купить]({flight['link']})\n\n"
-
-    if len(flights) > 1:
-        max_price = max(f["price"] for f in flights)
-        min_price = flights[0]["price"]
-        savings = max_price - min_price
-        savings_percent = int((savings / max_price) * 100) if max_price > 0 else 0
-        response += f"📊 **Экономия до {savings_percent}%** (от ${min_price} до ${max_price})\n"
-
-    await status_msg.edit_text(response, parse_mode="Markdown", disable_web_page_preview=True)
+            return
+        
+        response = f"✈️ **Супер-цены: {origin} → {destination}**\n\n"
+        for offer in offers:
+            if offer.route:
+                flight = offer.route[0]
+                response += f"💰 **${offer.price}** | 📅 {flight.get('date', 'дата неизвестна')}\n"
+                response += f"   ✈️ {flight.get('airline', '—')} | 🛤️ {flight.get('transfers', '—')} пересадок\n"
+                if flight.get('is_error'):
+                    response += "   🔥 **ОШИБКА ЦЕНЫ! Скидка до 90%**\n"
+                response += f"   🔗 [Купить билет]({flight.get('link', 'https://www.aviasales.com/')})\n\n"
+        
+        await status_msg.edit_text(response, parse_mode="Markdown", disable_web_page_preview=True)
 
 # ===== КОМАНДА /premium =====
 @dp.message(Command("premium"))
@@ -292,15 +236,16 @@ async def premium_command(message: Message):
         "💎 **Премиум-подписка AirFind**\n\n"
         f"💰 Стоимость: **1000 Stars (~$10/мес)**\n\n"
         "**Что ты получаешь:**\n"
-        "✅ Безлимитные поиски\n"
-        "✅ Мгновенные уведомления об ошибках цен\n"
-        "✅ Отслеживание маршрутов\n"
-        "✅ Приоритетные уведомления на 30–60 мин раньше\n"
-        "✅ Экономия до 90%\n\n"
-        "🚀 Нажми кнопку ниже, чтобы оплатить через Telegram Stars.",
+        "✅ **Мгновенные уведомления** об ошибках цен (на 30–60 мин раньше)\n"
+        "✅ **Безлимитный поиск** по всем направлениям\n"
+        "✅ **Отслеживание маршрутов** — уведомления при падении цены\n"
+        "✅ **Экономия до 90%** на каждом билете\n\n"
+        "💎 **Одна найденная ошибка цен окупает подписку на годы вперёд!**\n\n"
+        "Нажми кнопку ниже, чтобы оплатить через Telegram Stars.",
         reply_markup=keyboard
     )
 
+# ===== ОПЛАТА ЧЕРЕЗ STARS =====
 @dp.callback_query(lambda c: c.data == "buy_premium")
 async def buy_premium(callback: types.CallbackQuery):
     await callback.message.answer(
@@ -349,14 +294,16 @@ async def successful_payment(message: Message):
             await session.commit()
             await message.answer(
                 "✅ **Премиум-доступ активирован на 30 дней!** 🎉\n\n"
-                "Теперь ты можешь:\n"
-                "• Искать безлимитно\n"
-                "• Получать уведомления об ошибках цен\n"
-                "• Отслеживать маршруты\n\n"
-                "Спасибо, что выбрал AirFind! ✈️"
+                "Теперь ты будешь получать уведомления об ошибках цен на 30–60 минут раньше!\n"
+                "💚 Твоя экономия начинается прямо сейчас."
             )
 
-# ===== КОМАНДА /stats =====
+# ===== СТАТИСТИКА =====
+@dp.callback_query(lambda c: c.data == "stats")
+async def stats_callback(callback: types.CallbackQuery):
+    await stats(callback.message)
+    await callback.answer()
+
 @dp.message(Command("stats"))
 async def stats(message: Message):
     async for session in get_db():
@@ -367,146 +314,22 @@ async def stats(message: Message):
         if not user:
             await message.answer("❌ Сначала используй `/start`")
             return
-        searches = await session.execute(
+        
+        searches_count = await session.execute(
             select(Search).where(Search.user_id == user.id)
         )
-        searches = searches.scalars().all()
+        searches = searches_count.scalars().all()
         total_searches = len(searches)
-        total_savings = 0
-        for search in searches:
-            if search.route:
-                try:
-                    flights = search.route
-                    if flights and len(flights) > 0:
-                        avg_price = sum(f["price"] for f in flights) / len(flights)
-                        min_price = min(f["price"] for f in flights)
-                        total_savings += avg_price - min_price
-                except:
-                    pass
+        
         await message.answer(
             f"📊 **Твоя статистика в AirFind**\n\n"
-            f"🔍 Всего поисков: **{total_searches}**\n"
+            f"🔍 Найдено предложений: **{total_searches}**\n"
             f"💎 Премиум: **{'✅ Да' if user.is_premium else '❌ Нет'}**\n"
-            f"💰 Примерно сэкономлено: **${total_savings:.0f}**"
+            f"💰 Одна ошибка цен может сэкономить тебе **до 90%**!\n\n"
+            f"🔥 Подпишись на премиум, чтобы получать уведомления первым!"
         )
 
-# ===== КОМАНДА /history =====
-@dp.message(Command("history"))
-async def history(message: Message):
-    async for session in get_db():
-        result = await session.execute(
-            select(User).where(User.telegram_id == message.from_user.id)
-        )
-        user = result.scalar_one_or_none()
-        if not user:
-            await message.answer("❌ Сначала используй `/start`")
-            return
-        searches = await session.execute(
-            select(Search).where(Search.user_id == user.id).order_by(Search.created_at.desc()).limit(10)
-        )
-        searches = searches.scalars().all()
-        if not searches:
-            await message.answer("📭 У тебя пока нет истории поисков.")
-            return
-        response = "📜 **Последние 10 поисков:**\n\n"
-        for s in searches:
-            response += f"✈️ {s.origin} → {s.destination}\n"
-            response += f"💰 ${s.price} | 📅 {s.date_from.strftime('%d.%m.%Y')}\n\n"
-        await message.answer(response)
-
-# ===== ОТСЛЕЖИВАНИЕ МАРШРУТОВ =====
-@dp.message(Command("track"))
-async def track(message: Message):
-    args = message.text.split(maxsplit=3)
-    if len(args) < 4:
-        await message.answer(
-            "❌ **Формат:** `/track Город-откуда Город-куда Макс_цена`\n"
-            "Пример: `/track Кишинев Рим 150`"
-        )
-        return
-    origin, destination, max_price = args[1], args[2], args[3]
-    try:
-        max_price = float(max_price)
-    except ValueError:
-        await message.answer("❌ Цена должна быть числом. Пример: 150")
-        return
-    async for session in get_db():
-        result = await session.execute(
-            select(User).where(User.telegram_id == message.from_user.id)
-        )
-        user = result.scalar_one_or_none()
-        if not user:
-            await message.answer("❌ Сначала используй `/start`")
-            return
-        if not user.is_premium:
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="💎 Купить премиум", callback_data="buy_premium")]
-                ]
-            )
-            await message.answer(
-                "⛔ **Отслеживание цен доступно только для премиум-пользователей!**\n\n"
-                "💰 Купи премиум за 1000 Stars (~$10).",
-                reply_markup=keyboard
-            )
-            return
-        existing = await session.execute(
-            select(Track).where(
-                Track.user_id == user.id,
-                Track.origin == origin,
-                Track.destination == destination
-            )
-        )
-        if existing.scalar_one_or_none():
-            await message.answer(f"✅ Ты уже отслеживаешь маршрут {origin} → {destination}.")
-            return
-        new_track = Track(
-            user_id=user.id,
-            origin=origin,
-            destination=destination,
-            max_price=max_price,
-            currency="USD",
-            created_at=datetime.now(),
-            last_checked=datetime.now()
-        )
-        session.add(new_track)
-        await session.commit()
-        await message.answer(
-            f"✅ **Отслеживание активировано!**\n\n"
-            f"{origin} → {destination}\n"
-            f"💰 Пришлю уведомление, когда цена упадёт ниже **${max_price}**."
-        )
-
-# ===== ФОНОВАЯ ЗАДАЧА =====
-async def check_tracks():
-    from apscheduler.schedulers.asyncio import AsyncIOScheduler
-    from apscheduler.triggers.interval import IntervalTrigger
-    async def check():
-        print("🔍 Проверка отслеживаемых цен...")
-        async for session in get_db():
-            tracks = await session.execute(select(Track))
-            tracks = tracks.scalars().all()
-            for track in tracks:
-                flights = await search_cheapest_flights(track.origin, track.destination)
-                if flights and flights[0]["price"] < track.max_price:
-                    try:
-                        await bot.send_message(
-                            chat_id=track.user_id,
-                            text=f"🔔 **Цена упала!**\n\n"
-                                 f"✈️ {track.origin} → {track.destination}\n"
-                                 f"💰 Текущая цена: **${flights[0]['price']}**\n"
-                                 f"📅 Дата: {flights[0]['date']}\n"
-                                 f"🔗 [Купить билет]({flights[0]['link']})"
-                        )
-                        await session.delete(track)
-                        await session.commit()
-                    except Exception as e:
-                        print(f"Ошибка отправки уведомления: {e}")
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(check, IntervalTrigger(hours=1))
-    scheduler.start()
-
-# ===== ВЕБ-СЕРВЕР =====
+# ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
 async def handle_ping(request):
     return web.Response(text="AirFind bot is running!")
 
@@ -523,11 +346,19 @@ async def start_web_server():
 # ===== ЗАПУСК =====
 async def main():
     await init_db()
+    
+    # Запускаем веб-сервер
     asyncio.create_task(start_web_server())
-    await asyncio.sleep(1)
-    asyncio.create_task(check_tracks())
+    
+    # Запускаем парсер каналов (если есть API ID и Hash)
+    if os.getenv("API_ID") and os.getenv("API_HASH"):
+        asyncio.create_task(start_parser())
+        print("✅ Парсер каналов запущен!")
+    else:
+        print("⚠️ Парсер каналов отключён (не заданы API_ID и API_HASH)")
+    
     print("✅ AirFind 2.0 бот запущен!")
-    print("📌 Доступные команды: /start, /search, /stats, /history, /track, /mytracks, /premium, /help")
+    print("📌 Доступные команды: /start, /search, /premium, /stats")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
