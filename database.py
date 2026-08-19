@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, DECIMAL, JSON, BigInteger
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, DECIMAL, JSON, BigInteger, func
 from datetime import datetime
 
 DATABASE_URL = "sqlite+aiosqlite:///./airfind.db"
@@ -23,7 +23,7 @@ class User(Base):
 class Search(Base):
     __tablename__ = "searches"
     id = Column(Integer, primary_key=True)
-    user_id = Column(Integer)
+    user_id = Column(Integer)  # 0 — общее предложение из канала
     origin = Column(String)
     destination = Column(String)
     date_from = Column(DateTime)
