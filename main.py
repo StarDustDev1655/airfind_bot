@@ -2,23 +2,19 @@ import asyncio
 import os
 import logging
 import re
-import json
 from datetime import datetime, timedelta
-from aiohttp import web, ClientSession
+from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery
 from sqlalchemy import select
 from database import get_db, User, Search, Track, init_db
 
-# ===== НАСТРОЙКА ЛОГИРОВАНИЯ =====
+# ===== НАСТРОЙКА =====
 logging.basicConfig(level=logging.INFO)
-
-# ===== ТВОИ ТОКЕНЫ =====
 BOT_TOKEN = "8733069750:AAFCP2XoOKKLaDFob7Xa71vN1zYRBqhhAlU"
 TRAVELPAYOUTS_TOKEN = "4d2b4ad884f83f4d30f48770b40108a6"
 
-# ===== ИНИЦИАЛИЗАЦИЯ БОТА =====
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -35,111 +31,121 @@ CHANNELS = [
     '@budgettravelmd',
 ]
 
-# ===== ПАРСЕР КАНАЛОВ (Telethon) =====
+# ===== ПАРСЕР КАНАЛОВ =====
 async def start_parser():
-    """
-    Запускает парсинг каналов в фоновом режиме.
-    """
-    from telethon import TelegramClient, events
-    from telethon.tl.types import MessageEntityTextUrl
-    
-    # Получаем API ID и Hash из переменных окружения
-    api_id = int(os.getenv("API_ID", 0))
-    api_hash = os.getenv("API_HASH", "")
-    
-    if not api_id or not api_hash:
-        logging.warning("API_ID и API_HASH не заданы. Парсинг каналов отключён.")
-        return
-    
-    client = TelegramClient('airfind_session', api_id, api_hash)
-    await client.start()
-    
-    # Подписываемся на каналы
-    for channel in CHANNELS:
-        try:
-            await client.get_entity(channel)
-            logging.info(f"Подписан на канал: {channel}")
-        except Exception as e:
-            logging.warning(f"Не удалось подключиться к {channel}: {e}")
-    
-    @client.on(events.NewMessage(chats=CHANNELS))
-    async def handle_new_message(event):
-        try:
-            message = event.message
-            if not message or not message.text:
-                return
-            
-            text = message.text
-            # Ищем цены и направления
-            price_match = re.search(r'(\d+)\s*[€$]', text)
-            if not price_match:
-                return
-            
-            price = int(price_match.group(1))
-            
-            # Ищем направления (город->город)
-            direction_match = re.search(r'([А-Яа-яA-Za-z\s\-]+)\s*[—\-–]\s*([А-Яа-яA-Za-z\s\-]+)', text)
-            if not direction_match:
-                return
-            
-            origin = direction_match.group(1).strip()
-            destination = direction_match.group(2).strip()
-            
-            # Сохраняем в базу
-            async for session in get_db():
-                offer = Search(
-                    user_id=0,  # общее предложение
-                    origin=origin,
-                    destination=destination,
-                    date_from=datetime.now(),
-                    price=price,
-                    currency="USD",
-                    route=[{
-                        "date": datetime.now().strftime("%Y-%m-%d"),
-                        "price": price,
-                        "currency": "USD",
-                        "airline": "—",
-                        "transfers": "—",
-                        "link": "https://www.aviasales.com/",
-                        "is_error": True,
-                        "savings": 90
-                    }]
-                )
-                session.add(offer)
-                await session.commit()
+    """Запускает парсинг Telegram-каналов через Telethon"""
+    try:
+        from telethon import TelegramClient, events
+        import re
+        
+        api_id = int(os.getenv("API_ID", 0))
+        api_hash = os.getenv("API_HASH", "")
+        phone = os.getenv("PHONE_NUMBER", "")
+        
+        if not api_id or not api_hash or not phone:
+            logging.warning("API_ID, API_HASH или PHONE_NUMBER не заданы. Парсинг каналов отключён.")
+            return
+        
+        # Создаём клиента с сессией
+        client = TelegramClient('airfind_session', api_id, api_hash)
+        
+        # Вход с номером телефона (без запроса в консоли)
+        await client.start(phone=phone)
+        logging.info("✅ Telethon авторизован!")
+        
+        # Проверяем доступ к каналам
+        for channel in CHANNELS:
+            try:
+                entity = await client.get_entity(channel)
+                logging.info(f"✅ Подписан на канал: {channel} (ID: {entity.id})")
+            except Exception as e:
+                logging.warning(f"⚠️ Не удалось подключиться к {channel}: {e}")
+        
+        @client.on(events.NewMessage(chats=CHANNELS))
+        async def handle_new_message(event):
+            try:
+                message = event.message
+                if not message or not message.text:
+                    return
                 
-                # Уведомляем премиум-пользователей, которые ждут это направление
-                tracks = await session.execute(
-                    select(Track).where(
-                        Track.origin.ilike(f"%{origin}%"),
-                        Track.destination.ilike(f"%{destination}%")
+                text = message.text
+                logging.info(f"📩 Новое сообщение из канала: {text[:100]}...")
+                
+                # Поиск цены в тексте
+                price_match = re.search(r'(\d+)\s*[€$]', text)
+                if not price_match:
+                    return
+                price = int(price_match.group(1))
+                
+                # Поиск направления
+                direction_match = re.search(r'([А-Яа-яA-Za-z\s\-]+)\s*[—\-–]\s*([А-Яа-яA-Za-z\s\-]+)', text)
+                if not direction_match:
+                    return
+                
+                origin = direction_match.group(1).strip()
+                destination = direction_match.group(2).strip()
+                
+                logging.info(f"✈️ Найдено предложение: {origin} → {destination} за ${price}")
+                
+                # Сохраняем в базу как общее предложение (user_id = 0)
+                async for session in get_db():
+                    offer = Search(
+                        user_id=0,
+                        origin=origin,
+                        destination=destination,
+                        date_from=datetime.now(),
+                        price=price,
+                        currency="USD",
+                        route=[{
+                            "date": datetime.now().strftime("%Y-%m-%d"),
+                            "price": price,
+                            "currency": "USD",
+                            "airline": "—",
+                            "transfers": "—",
+                            "link": f"https://www.aviasales.com/search/{origin}{destination}",
+                            "is_error": True,
+                            "savings": 90
+                        }]
                     )
-                )
-                for track in tracks.scalars().all():
-                    try:
-                        await bot.send_message(
-                            chat_id=track.user_id,
-                            text=f"🔥 **ОШИБКА ЦЕНЫ!**\n\n"
-                                 f"✈️ {origin} → {destination}\n"
-                                 f"💰 Цена: **${price}**\n"
-                                 f"📅 Дата: {datetime.now().strftime('%d.%m.%Y')}\n"
-                                 f"💚 Скидка до 90%!\n\n"
-                                 f"🔗 [Купить билет](https://www.aviasales.com/search/{origin}{destination})"
+                    session.add(offer)
+                    await session.commit()
+                    
+                    # Уведомляем премиум-пользователей, которые отслеживают это направление
+                    tracks = await session.execute(
+                        select(Track).where(
+                            Track.origin.ilike(f"%{origin}%"),
+                            Track.destination.ilike(f"%{destination}%")
                         )
-                    except Exception as e:
-                        logging.error(f"Ошибка уведомления: {e}")
-        except Exception as e:
-            logging.error(f"Ошибка обработки сообщения: {e}")
-    
-    await client.run_until_disconnected()
+                    )
+                    for track in tracks.scalars().all():
+                        try:
+                            await bot.send_message(
+                                chat_id=track.user_id,
+                                text=f"🔥 **ОШИБКА ЦЕНЫ!**\n\n"
+                                     f"✈️ {origin} → {destination}\n"
+                                     f"💰 Цена: **${price}**\n"
+                                     f"💚 Скидка до 90%!\n\n"
+                                     f"🔗 [Купить билет](https://www.aviasales.com/search/{origin}{destination})"
+                            )
+                            logging.info(f"📨 Уведомление отправлено пользователю {track.user_id}")
+                        except Exception as e:
+                            logging.error(f"Ошибка уведомления: {e}")
+                            
+            except Exception as e:
+                logging.error(f"Ошибка обработки сообщения: {e}")
+        
+        # Запускаем клиента (ждём сообщения)
+        await client.run_until_disconnected()
+        
+    except Exception as e:
+        logging.error(f"❌ Ошибка запуска парсера: {e}")
 
 # ===== КОМАНДА /start =====
 @dp.message(Command("start"))
 async def start(message: Message):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💎 Купить премиум", callback_data="buy_premium")],
-            [InlineKeyboardButton(text="📊 Моя статистика", callback_data="stats")]
+            [InlineKeyboardButton(text="💎 Купить премиум", callback_data="buy_premium")]
         ]
     )
     
@@ -164,10 +170,10 @@ async def start(message: Message):
             "🔥 **Я нахожу билеты с ошибками цен** — те самые, за €50 вместо €500.\n"
             "💡 **Как я это делаю:** я мониторю 10+ каналов с дешёвыми билетами и мгновенно присылаю тебе лучшие предложения.\n\n"
             "💰 **Премиум за 1000 Stars (~$10/мес) даёт тебе:**\n"
-            "✅ **Мгновенные уведомления** об ошибках цен (на 30–60 мин раньше, чем в каналах)\n"
-            "✅ **Безлимитный поиск** по всем направлениям\n"
-            "✅ **Отслеживание маршрутов** — я пришлю уведомление, когда цена упадёт\n"
-            "✅ **Экономия до 90%** на каждом билете\n\n"
+            "✅ Мгновенные уведомления об ошибках цен\n"
+            "✅ Безлимитный поиск по всем направлениям\n"
+            "✅ Отслеживание маршрутов\n"
+            "✅ Экономия до 90% на каждом билете\n\n"
             "💎 **Одна найденная ошибка цен окупает подписку на годы вперёд!**\n\n"
             "🔍 Попробуй прямо сейчас: `/search Кишинев Рим`",
             reply_markup=keyboard,
@@ -190,7 +196,6 @@ async def search(message: Message):
     status_msg = await message.answer("🔍 **Ищу супер-цены...** ⏳")
     
     async for session in get_db():
-        # Ищем в базе сохранённые предложения
         results = await session.execute(
             select(Search).where(
                 Search.origin.ilike(f"%{origin}%"),
@@ -217,7 +222,7 @@ async def search(message: Message):
             if offer.route:
                 flight = offer.route[0]
                 response += f"💰 **${offer.price}** | 📅 {flight.get('date', 'дата неизвестна')}\n"
-                response += f"   ✈️ {flight.get('airline', '—')} | 🛤️ {flight.get('transfers', '—')} пересадок\n"
+                response += f"   ✈️ {flight.get('airline', '—')}\n"
                 if flight.get('is_error'):
                     response += "   🔥 **ОШИБКА ЦЕНЫ! Скидка до 90%**\n"
                 response += f"   🔗 [Купить билет]({flight.get('link', 'https://www.aviasales.com/')})\n\n"
@@ -236,11 +241,10 @@ async def premium_command(message: Message):
         "💎 **Премиум-подписка AirFind**\n\n"
         f"💰 Стоимость: **1000 Stars (~$10/мес)**\n\n"
         "**Что ты получаешь:**\n"
-        "✅ **Мгновенные уведомления** об ошибках цен (на 30–60 мин раньше)\n"
-        "✅ **Безлимитный поиск** по всем направлениям\n"
-        "✅ **Отслеживание маршрутов** — уведомления при падении цены\n"
-        "✅ **Экономия до 90%** на каждом билете\n\n"
-        "💎 **Одна найденная ошибка цен окупает подписку на годы вперёд!**\n\n"
+        "✅ Мгновенные уведомления об ошибках цен\n"
+        "✅ Безлимитный поиск\n"
+        "✅ Отслеживание маршрутов\n"
+        "✅ Экономия до 90%\n\n"
         "Нажми кнопку ниже, чтобы оплатить через Telegram Stars.",
         reply_markup=keyboard
     )
@@ -294,16 +298,10 @@ async def successful_payment(message: Message):
             await session.commit()
             await message.answer(
                 "✅ **Премиум-доступ активирован на 30 дней!** 🎉\n\n"
-                "Теперь ты будешь получать уведомления об ошибках цен на 30–60 минут раньше!\n"
-                "💚 Твоя экономия начинается прямо сейчас."
+                "Теперь ты будешь получать уведомления об ошибках цен на 30–60 минут раньше!"
             )
 
 # ===== СТАТИСТИКА =====
-@dp.callback_query(lambda c: c.data == "stats")
-async def stats_callback(callback: types.CallbackQuery):
-    await stats(callback.message)
-    await callback.answer()
-
 @dp.message(Command("stats"))
 async def stats(message: Message):
     async for session in get_db():
@@ -315,17 +313,15 @@ async def stats(message: Message):
             await message.answer("❌ Сначала используй `/start`")
             return
         
-        searches_count = await session.execute(
+        searches = await session.execute(
             select(Search).where(Search.user_id == user.id)
         )
-        searches = searches_count.scalars().all()
-        total_searches = len(searches)
+        total_searches = len(searches.scalars().all())
         
         await message.answer(
             f"📊 **Твоя статистика в AirFind**\n\n"
             f"🔍 Найдено предложений: **{total_searches}**\n"
-            f"💎 Премиум: **{'✅ Да' if user.is_premium else '❌ Нет'}**\n"
-            f"💰 Одна ошибка цен может сэкономить тебе **до 90%**!\n\n"
+            f"💎 Премиум: **{'✅ Да' if user.is_premium else '❌ Нет'}**\n\n"
             f"🔥 Подпишись на премиум, чтобы получать уведомления первым!"
         )
 
@@ -350,12 +346,8 @@ async def main():
     # Запускаем веб-сервер
     asyncio.create_task(start_web_server())
     
-    # Запускаем парсер каналов (если есть API ID и Hash)
-    if os.getenv("API_ID") and os.getenv("API_HASH"):
-        asyncio.create_task(start_parser())
-        print("✅ Парсер каналов запущен!")
-    else:
-        print("⚠️ Парсер каналов отключён (не заданы API_ID и API_HASH)")
+    # Запускаем парсер каналов
+    asyncio.create_task(start_parser())
     
     print("✅ AirFind 2.0 бот запущен!")
     print("📌 Доступные команды: /start, /search, /premium, /stats")
