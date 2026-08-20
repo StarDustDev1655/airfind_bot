@@ -31,7 +31,7 @@ CHANNELS = [
     '@budgettravelmd',
 ]
 
-# ===== ПАРСЕР КАНАЛОВ =====
+# ===== ПАРСЕР КАНАЛОВ (ИСПРАВЛЕННЫЙ) =====
 async def start_parser():
     try:
         from telethon import TelegramClient, events
@@ -60,17 +60,20 @@ async def start_parser():
                     return
                 text = message.text
 
+                # Ищем цену (число и валюта)
                 price_match = re.search(r'(\d+)\s*[€$]', text)
                 if not price_match:
                     return
                 price = int(price_match.group(1))
 
+                # Ищем направление (город → город)
                 direction_match = re.search(r'([А-Яа-яA-Za-z\s\-]+)\s*[—\-–]\s*([А-Яа-яA-Za-z\s\-]+)', text)
                 if not direction_match:
                     return
                 origin = direction_match.group(1).strip()
                 destination = direction_match.group(2).strip()
 
+                # Сохраняем в базу
                 async for session in get_db():
                     offer = Search(
                         user_id=0,
@@ -94,6 +97,7 @@ async def start_parser():
                     await session.commit()
                     logging.info(f"Сохранено предложение: {origin} → {destination} за ${price}")
 
+                    # Уведомляем премиум-пользователей
                     tracks = await session.execute(
                         select(Track).where(
                             Track.origin.ilike(f"%{origin}%"),
