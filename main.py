@@ -31,7 +31,7 @@ CHANNELS = [
     '@budgettravelmd',
 ]
 
-# ===== ПАРСЕР КАНАЛОВ (ИСПРАВЛЕННЫЙ) =====
+# ===== НОВЫЙ ПАРСЕР (БЕЗ ОШИБОК) =====
 async def start_parser():
     try:
         from telethon import TelegramClient, events
@@ -60,13 +60,13 @@ async def start_parser():
                     return
                 text = message.text
 
-                # Ищем цену (число и валюта)
+                # Ищем цену
                 price_match = re.search(r'(\d+)\s*[€$]', text)
                 if not price_match:
                     return
                 price = int(price_match.group(1))
 
-                # Ищем направление (город → город)
+                # Ищем направление: "Кишинев – Рим" или "KIV – FCO"
                 direction_match = re.search(r'([А-Яа-яA-Za-z\s\-]+)\s*[—\-–]\s*([А-Яа-яA-Za-z\s\-]+)', text)
                 if not direction_match:
                     return
@@ -95,9 +95,9 @@ async def start_parser():
                     )
                     session.add(offer)
                     await session.commit()
-                    logging.info(f"Сохранено предложение: {origin} → {destination} за ${price}")
+                    logging.info(f"✅ Сохранено: {origin} → {destination} за ${price}")
 
-                    # Уведомляем премиум-пользователей
+                    # Уведомления премиум-пользователям
                     tracks = await session.execute(
                         select(Track).where(
                             Track.origin.ilike(f"%{origin}%"),
@@ -152,11 +152,10 @@ async def start(message: Message):
             "🔥 **Я нахожу билеты с ошибками цен** — те самые, за €50 вместо €500.\n"
             "💡 **Как я это делаю:** я мониторю 10+ каналов с дешёвыми билетами и мгновенно присылаю тебе лучшие предложения.\n\n"
             "💰 **Премиум за 1000 Stars (~$10/мес) даёт тебе:**\n"
-            "✅ **Мгновенные уведомления** об ошибках цен (на 30–60 мин раньше, чем в каналах)\n"
-            "✅ **Безлимитный поиск** по всем направлениям\n"
-            "✅ **Отслеживание маршрутов** — я пришлю уведомление, когда цена упадёт\n"
-            "✅ **Экономия до 90%** на каждом билете\n\n"
-            "💎 **Одна найденная ошибка цен окупает подписку на годы вперёд!**\n\n"
+            "✅ **Мгновенные уведомления** об ошибках цен\n"
+            "✅ **Безлимитный поиск**\n"
+            "✅ **Отслеживание маршрутов**\n"
+            "✅ **Экономия до 90%**\n\n"
             "🔍 Попробуй прямо сейчас: `/search Кишинев Рим`",
             reply_markup=keyboard,
             parse_mode="Markdown"
@@ -217,11 +216,10 @@ async def premium_command(message: Message):
         "💎 **Премиум-подписка AirFind**\n\n"
         f"💰 Стоимость: **1000 Stars (~$10/мес)**\n\n"
         "**Что ты получаешь:**\n"
-        "✅ **Мгновенные уведомления** об ошибках цен (на 30–60 мин раньше)\n"
-        "✅ **Безлимитный поиск** по всем направлениям\n"
-        "✅ **Отслеживание маршрутов** — уведомления при падении цены\n"
-        "✅ **Экономия до 90%** на каждом билете\n\n"
-        "💎 **Одна найденная ошибка цен окупает подписку на годы вперёд!**\n\n"
+        "✅ **Мгновенные уведомления** об ошибках цен\n"
+        "✅ **Безлимитный поиск**\n"
+        "✅ **Отслеживание маршрутов**\n"
+        "✅ **Экономия до 90%**\n\n"
         "Нажми кнопку ниже, чтобы оплатить через Telegram Stars.",
         reply_markup=keyboard
     )
@@ -275,7 +273,7 @@ async def successful_payment(message: Message):
             await session.commit()
             await message.answer(
                 "✅ **Премиум-доступ активирован на 30 дней!** 🎉\n\n"
-                "Теперь ты будешь получать уведомления об ошибках цен на 30–60 минут раньше!\n"
+                "Теперь ты будешь получать уведомления об ошибках цен!\n"
                 "💚 Твоя экономия начинается прямо сейчас."
             )
 
@@ -308,6 +306,69 @@ async def stats(message: Message):
             f"🔥 Подпишись на премиум, чтобы получать уведомления первым!"
         )
 
+# ===== КОМАНДА /track =====
+@dp.message(Command("track"))
+async def track(message: Message):
+    args = message.text.split(maxsplit=3)
+    if len(args) < 4:
+        await message.answer(
+            "❌ **Формат:** `/track Город-откуда Город-куда Макс_цена`\n"
+            "Пример: `/track Кишинев Рим 150`"
+        )
+        return
+    origin, destination, max_price = args[1], args[2], args[3]
+    try:
+        max_price = float(max_price)
+    except ValueError:
+        await message.answer("❌ Цена должна быть числом. Пример: 150")
+        return
+    async for session in get_db():
+        result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            await message.answer("❌ Сначала используй `/start`")
+            return
+        if not user.is_premium:
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="💎 Купить премиум", callback_data="buy_premium")]
+                ]
+            )
+            await message.answer(
+                "⛔ **Отслеживание цен доступно только для премиум-пользователей!**\n\n"
+                "💰 Купи премиум за 1000 Stars (~$10).",
+                reply_markup=keyboard
+            )
+            return
+        existing = await session.execute(
+            select(Track).where(
+                Track.user_id == user.id,
+                Track.origin == origin,
+                Track.destination == destination
+            )
+        )
+        if existing.scalar_one_or_none():
+            await message.answer(f"✅ Ты уже отслеживаешь маршрут {origin} → {destination}.")
+            return
+        new_track = Track(
+            user_id=user.id,
+            origin=origin,
+            destination=destination,
+            max_price=max_price,
+            currency="USD",
+            created_at=datetime.now(),
+            last_checked=datetime.now()
+        )
+        session.add(new_track)
+        await session.commit()
+        await message.answer(
+            f"✅ **Отслеживание активировано!**\n\n"
+            f"{origin} → {destination}\n"
+            f"💰 Пришлю уведомление, когда цена упадёт ниже **${max_price}**."
+        )
+
 # ===== ВЕБ-СЕРВЕР =====
 async def handle_ping(request):
     return web.Response(text="AirFind bot is running!")
@@ -332,7 +393,7 @@ async def main():
     else:
         print("⚠️ Парсер каналов отключён (не заданы API_ID и API_HASH)")
     print("✅ AirFind 2.0 бот запущен!")
-    print("📌 Доступные команды: /start, /search, /premium, /stats")
+    print("📌 Доступные команды: /start, /search, /premium, /stats, /track")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
