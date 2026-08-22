@@ -15,6 +15,7 @@ from database import get_db, User, Search, Track, init_db
 logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = "8733069750:AAFCP2XoOKKLaDFob7Xa71vN1zYRBqhhAlU"
 TRAVELPAYOUTS_TOKEN = "4d2b4ad884f83f4d30f48770b40108a6"
+ADMIN_ID = 8128352054  # ТВОЙ TELEGRAM ID
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -120,6 +121,33 @@ async def start_parser():
     except Exception as e:
         logging.error(f"❌ Ошибка запуска парсера: {e}")
 
+# ===== КОМАНДА /get_premium (ТОЛЬКО ДЛЯ АДМИНА) =====
+@dp.message(Command("get_premium"))
+async def get_premium(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ У вас нет прав для этой команды.")
+        return
+    
+    async for session in get_db():
+        result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+        if user:
+            user.is_premium = True
+            user.premium_until = datetime.now() + timedelta(days=365)
+            await session.commit()
+            await message.answer(
+                "✅ **Премиум-доступ активирован на 365 дней!** 🎉\n\n"
+                "Теперь ты можешь:\n"
+                "• Использовать все функции бота\n"
+                "• Получать уведомления об ошибках цен\n"
+                "• Отслеживать маршруты\n\n"
+                "🔥 Твоя экономия начинается прямо сейчас!"
+            )
+        else:
+            await message.answer("❌ Пользователь не найден. Сначала используй `/start`.")
+
 # ===== КОМАНДА /start =====
 @dp.message(Command("start"))
 async def start(message: Message):
@@ -146,7 +174,6 @@ async def start(message: Message):
                 session.add(new_user)
                 await session.commit()
             else:
-                # Обновляем данные пользователя, если они изменились
                 if user.username != message.from_user.username:
                     user.username = message.from_user.username
                     await session.commit()
@@ -155,10 +182,8 @@ async def start(message: Message):
                     await session.commit()
         except Exception as e:
             logging.error(f"Ошибка при работе с базой данных: {e}")
-            # Если ошибка, пробуем обновить существующего пользователя
             try:
                 await session.rollback()
-                # Просто обновляем существующего пользователя
                 result = await session.execute(
                     select(User).where(User.telegram_id == message.from_user.id)
                 )
@@ -417,7 +442,7 @@ async def main():
     else:
         print("⚠️ Парсер каналов отключён (не заданы API_ID и API_HASH)")
     print("✅ AirFind 2.0 бот запущен!")
-    print("📌 Доступные команды: /start, /search, /premium, /stats, /track")
+    print("📌 Доступные команды: /start, /search, /premium, /stats, /track, /get_premium")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
