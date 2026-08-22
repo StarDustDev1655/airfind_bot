@@ -31,7 +31,7 @@ CHANNELS = [
     '@budgettravelmd',
 ]
 
-# ===== НОВЫЙ ПАРСЕР (БЕЗ ОШИБОК) =====
+# ===== ПАРСЕР КАНАЛОВ =====
 async def start_parser():
     try:
         from telethon import TelegramClient, events
@@ -60,20 +60,17 @@ async def start_parser():
                     return
                 text = message.text
 
-                # Ищем цену
                 price_match = re.search(r'(\d+)\s*[€$]', text)
                 if not price_match:
                     return
                 price = int(price_match.group(1))
 
-                # Ищем направление: "Кишинев – Рим" или "KIV – FCO"
                 direction_match = re.search(r'([А-Яа-яA-Za-z\s\-]+)\s*[—\-–]\s*([А-Яа-яA-Za-z\s\-]+)', text)
                 if not direction_match:
                     return
                 origin = direction_match.group(1).strip()
                 destination = direction_match.group(2).strip()
 
-                # Сохраняем в базу
                 async for session in get_db():
                     offer = Search(
                         user_id=0,
@@ -97,7 +94,6 @@ async def start_parser():
                     await session.commit()
                     logging.info(f"✅ Сохранено: {origin} → {destination} за ${price}")
 
-                    # Уведомления премиум-пользователям
                     tracks = await session.execute(
                         select(Track).where(
                             Track.origin.ilike(f"%{origin}%"),
@@ -134,19 +130,47 @@ async def start(message: Message):
         ]
     )
     async for session in get_db():
-        result = await session.execute(
-            select(User).where(User.telegram_id == message.from_user.id)
-        )
-        user = result.scalar_one_or_none()
-        if not user:
-            new_user = User(
-                telegram_id=message.from_user.id,
-                username=message.from_user.username,
-                first_name=message.from_user.first_name,
-                created_at=datetime.now()
+        try:
+            result = await session.execute(
+                select(User).where(User.telegram_id == message.from_user.id)
             )
-            session.add(new_user)
-            await session.commit()
+            user = result.scalar_one_or_none()
+            
+            if not user:
+                new_user = User(
+                    telegram_id=message.from_user.id,
+                    username=message.from_user.username,
+                    first_name=message.from_user.first_name,
+                    created_at=datetime.now()
+                )
+                session.add(new_user)
+                await session.commit()
+            else:
+                # Обновляем данные пользователя, если они изменились
+                if user.username != message.from_user.username:
+                    user.username = message.from_user.username
+                    await session.commit()
+                if user.first_name != message.from_user.first_name:
+                    user.first_name = message.from_user.first_name
+                    await session.commit()
+        except Exception as e:
+            logging.error(f"Ошибка при работе с базой данных: {e}")
+            # Если ошибка, пробуем обновить существующего пользователя
+            try:
+                await session.rollback()
+                # Просто обновляем существующего пользователя
+                result = await session.execute(
+                    select(User).where(User.telegram_id == message.from_user.id)
+                )
+                user = result.scalar_one_or_none()
+                if user:
+                    user.username = message.from_user.username
+                    user.first_name = message.from_user.first_name
+                    await session.commit()
+            except Exception as e2:
+                logging.error(f"Не удалось обновить пользователя: {e2}")
+                await session.rollback()
+        
         await message.answer(
             "✈️ **AirFind — твой личный охотник за супер-ценами!**\n\n"
             "🔥 **Я нахожу билеты с ошибками цен** — те самые, за €50 вместо €500.\n"
