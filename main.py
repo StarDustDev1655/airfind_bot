@@ -2,7 +2,6 @@ import asyncio
 import os
 import logging
 import re
-import json
 from datetime import datetime, timedelta
 from aiohttp import web, ClientSession
 from aiogram import Bot, Dispatcher, types
@@ -15,7 +14,7 @@ from database import get_db, User, Search, Track, init_db
 logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = "8733069750:AAFCP2XoOKKLaDFob7Xa71vN1zYRBqhhAlU"
 TRAVELPAYOUTS_TOKEN = "4d2b4ad884f83f4d30f48770b40108a6"
-ADMIN_ID = 8128352054  # ТВОЙ TELEGRAM ID
+ADMIN_ID = 8128352054
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -32,7 +31,7 @@ CHANNELS = [
     '@budgettravelmd',
 ]
 
-# ===== ПАРСЕР КАНАЛОВ =====
+# ===== ПАРСЕР (запускается в фоне) =====
 async def start_parser():
     try:
         from telethon import TelegramClient, events
@@ -121,7 +120,7 @@ async def start_parser():
     except Exception as e:
         logging.error(f"❌ Ошибка запуска парсера: {e}")
 
-# ===== КОМАНДА /get_premium (ТОЛЬКО ДЛЯ АДМИНА) =====
+# ===== КОМАНДА /get_premium =====
 @dp.message(Command("get_premium"))
 async def get_premium(message: Message):
     if message.from_user.id != ADMIN_ID:
@@ -158,44 +157,19 @@ async def start(message: Message):
         ]
     )
     async for session in get_db():
-        try:
-            result = await session.execute(
-                select(User).where(User.telegram_id == message.from_user.id)
+        result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            new_user = User(
+                telegram_id=message.from_user.id,
+                username=message.from_user.username,
+                first_name=message.from_user.first_name,
+                created_at=datetime.now()
             )
-            user = result.scalar_one_or_none()
-            
-            if not user:
-                new_user = User(
-                    telegram_id=message.from_user.id,
-                    username=message.from_user.username,
-                    first_name=message.from_user.first_name,
-                    created_at=datetime.now()
-                )
-                session.add(new_user)
-                await session.commit()
-            else:
-                if user.username != message.from_user.username:
-                    user.username = message.from_user.username
-                    await session.commit()
-                if user.first_name != message.from_user.first_name:
-                    user.first_name = message.from_user.first_name
-                    await session.commit()
-        except Exception as e:
-            logging.error(f"Ошибка при работе с базой данных: {e}")
-            try:
-                await session.rollback()
-                result = await session.execute(
-                    select(User).where(User.telegram_id == message.from_user.id)
-                )
-                user = result.scalar_one_or_none()
-                if user:
-                    user.username = message.from_user.username
-                    user.first_name = message.from_user.first_name
-                    await session.commit()
-            except Exception as e2:
-                logging.error(f"Не удалось обновить пользователя: {e2}")
-                await session.rollback()
-        
+            session.add(new_user)
+            await session.commit()
         await message.answer(
             "✈️ **AirFind — твой личный охотник за супер-ценами!**\n\n"
             "🔥 **Я нахожу билеты с ошибками цен** — те самые, за €50 вместо €500.\n"
@@ -252,6 +226,52 @@ async def search(message: Message):
                     response += "   🔥 **ОШИБКА ЦЕНЫ! Скидка до 90%**\n"
                 response += f"   🔗 [Купить билет]({flight.get('link', 'https://www.aviasales.com/')})\n\n"
         await status_msg.edit_text(response, parse_mode="Markdown", disable_web_page_preview=True)
+
+# ===== КОМАНДА /addoffer (ТОЛЬКО ДЛЯ АДМИНА) =====
+@dp.message(Command("addoffer"))
+async def add_offer(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ У вас нет прав для этой команды.")
+        return
+    
+    args = message.text.split(maxsplit=5)
+    if len(args) < 6:
+        await message.answer(
+            "❌ **Формат:** `/addoffer Город-откуда Город-куда Цена Дата Ссылка`\n"
+            "Пример: `/addoffer Кишинев Рим 50 2026-09-01 https://aviasales.com/...`"
+        )
+        return
+    
+    origin, destination, price, date, link = args[1], args[2], args[3], args[4], args[5]
+    
+    try:
+        price = float(price)
+    except ValueError:
+        await message.answer("❌ Цена должна быть числом.")
+        return
+    
+    async for session in get_db():
+        offer = Search(
+            user_id=0,
+            origin=origin,
+            destination=destination,
+            date_from=datetime.strptime(date, "%Y-%m-%d"),
+            price=price,
+            currency="USD",
+            route=[{
+                "date": date,
+                "price": price,
+                "currency": "USD",
+                "airline": "—",
+                "transfers": "—",
+                "link": link,
+                "is_error": True,
+                "savings": 90
+            }]
+        )
+        session.add(offer)
+        await session.commit()
+        await message.answer(f"✅ Предложение добавлено: {origin} → {destination} за ${price}")
 
 # ===== КОМАНДА /premium =====
 @dp.message(Command("premium"))
@@ -442,7 +462,7 @@ async def main():
     else:
         print("⚠️ Парсер каналов отключён (не заданы API_ID и API_HASH)")
     print("✅ AirFind 2.0 бот запущен!")
-    print("📌 Доступные команды: /start, /search, /premium, /stats, /track, /get_premium")
+    print("📌 Доступные команды: /start, /search, /premium, /stats, /track, /get_premium, /addoffer")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
