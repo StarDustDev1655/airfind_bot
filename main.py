@@ -1,39 +1,3 @@
-import asyncio
-import os
-import logging
-import re
-from datetime import datetime, timedelta
-from aiohttp import web, ClientSession
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, PreCheckoutQuery
-from sqlalchemy import select
-from database import get_db, User, Search, Track, init_db
-
-# ===== НАСТРОЙКА =====
-logging.basicConfig(level=logging.INFO)
-BOT_TOKEN = "8733069750:AAFCP2XoOKKLaDFob7Xa71vN1zYRBqhhAlU"
-TRAVELPAYOUTS_TOKEN = "4d2b4ad884f83f4d30f48770b40108a6"
-ADMIN_ID = 8128352054
-
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-PREMIUM_PRICE = 1000
-
-# ===== КАНАЛЫ ДЛЯ ПАРСИНГА =====
-CHANNELS = [
-    '@samokatus',
-    '@travelradar',
-    '@vandroukiru',
-    '@nashaplaneta_net',
-    '@aviasales',
-    '@travelmd',
-    '@budgettravelmd',
-]
-
-# ===== ПАРСЕР (запускается в фоне) =====
-async def start_parser():
-    try:
         from telethon import TelegramClient, events
         api_id = int(os.getenv("API_ID", 0))
         api_hash = os.getenv("API_HASH", "")
@@ -467,3 +431,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+                
